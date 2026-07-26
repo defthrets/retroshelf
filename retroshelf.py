@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """RetroShelf — single-file retro game launcher.
 
-Serves a local web GUI that scans a library folder for ROMs and emulators,
-shows every game per system, and launches the matching emulator.
+Serves a local web GUI that auto-scans a games folder (recursively, any
+structure), figures out which system each game belongs to, and launches it
+through the matching emulator. Emulators can be auto-downloaded per system
+from their official releases, or the UI links to the download page.
 
-Layout it expects (created via Settings > Create Folder Layout):
-
-    <library_root>\
-        roms\<system_id>\        <- drop your game files here
-        emulators\<system_id>\   <- drop the emulator (unzipped) here
-        art\<system_id>\         <- optional box art, same filename as rom
-
-Box art is also picked up from an image sitting next to the rom with the
-same name, or from an "art"/"covers" subfolder inside the rom directory.
+Folders (Settings tab):
+    library_root    — your games, scanned recursively (e.g. M:\oldgames)
+    emulators_root  — emulators live in <emulators_root>\<system>\
+    art_root        — covers in <art_root>\<system>\, screenshots in
+                      <art_root>\<system>\screens\, named like the rom file.
+                      Art can also sit next to the rom (or in art/ covers/
+                      screens/ screenshots/ subfolders beside it).
 
 Run:  python retroshelf.py          (opens browser)
       python retroshelf.py --no-browser
@@ -20,12 +20,16 @@ Run:  python retroshelf.py          (opens browser)
 
 import json
 import mimetypes
+import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -35,65 +39,170 @@ CONFIG_PATH = APP_DIR / "retroshelf.json"
 
 DEFAULT_ARGS = '"{emu}" "{rom}"'
 
-# Each system: folder id, display name, rom extensions, exe names to look for,
-# launch template, and where to get the emulator (shown in the Systems tab).
+# Each system: display name, exe names to look for, launch template, where the
+# emulator comes from ("dl" = auto-download spec, "emu_url" = manual page).
 SYSTEMS = [
-    {"id": "nes", "name": "Nintendo NES", "exts": [".nes", ".fds", ".zip"],
+    {"id": "nes", "name": "Nintendo NES",
      "exes": ["mesen.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "Mesen", "emu_site": "mesen.ca"},
-    {"id": "snes", "name": "Super Nintendo", "exts": [".sfc", ".smc", ".zip"],
+     "emu_name": "Mesen", "emu_site": "mesen.ca",
+     "emu_url": "https://github.com/SourMesen/Mesen2/releases",
+     "dl": {"repo": "SourMesen/Mesen2", "asset": r"Windows\.zip$"},
+     "note": "Windows build needs the .NET 8 Desktop Runtime installed."},
+    {"id": "snes", "name": "Super Nintendo",
      "exes": ["snes9x-x64.exe", "snes9x.exe", "bsnes.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "Snes9x", "emu_site": "snes9x.com"},
-    {"id": "n64", "name": "Nintendo 64", "exts": [".z64", ".n64", ".v64", ".zip"],
+     "emu_name": "Snes9x", "emu_site": "snes9x.com",
+     "emu_url": "https://github.com/snes9xgit/snes9x/releases",
+     "dl": {"repo": "snes9xgit/snes9x", "asset": r"win32-x64\.zip$"}},
+    {"id": "n64", "name": "Nintendo 64",
      "exes": ["simple64-gui.exe", "project64.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "simple64", "emu_site": "simple64.github.io"},
-    {"id": "gb", "name": "Game Boy / Color", "exts": [".gb", ".gbc", ".zip"],
-     "exes": ["mgba.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "mGBA", "emu_site": "mgba.io"},
-    {"id": "gba", "name": "Game Boy Advance", "exts": [".gba", ".zip"],
-     "exes": ["mgba.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "mGBA", "emu_site": "mgba.io"},
-    {"id": "nds", "name": "Nintendo DS", "exts": [".nds"],
+     "emu_name": "simple64", "emu_site": "simple64.github.io",
+     "emu_url": "https://github.com/simple64/simple64/releases",
+     "dl": {"repo": "simple64/simple64", "asset": r"win64.*\.zip$"},
+     "note": "simple64 is the maintained GUI bundle of the mupen64plus core."},
+    {"id": "gb", "name": "Game Boy / Color",
+     "exes": ["visualboyadvance-m.exe", "mgba.exe"], "args": DEFAULT_ARGS,
+     "emu_name": "VisualBoyAdvance-M", "emu_site": "vba-m.com",
+     "emu_url": "https://github.com/visualboyadvance-m/visualboyadvance-m/releases",
+     "dl": {"repo": "visualboyadvance-m/visualboyadvance-m",
+            "asset": r"^visualboyadvance-m-Win-x86_64\.zip$"}},
+    {"id": "gba", "name": "Game Boy Advance",
+     "exes": ["visualboyadvance-m.exe", "mgba.exe"], "args": DEFAULT_ARGS,
+     "emu_name": "VisualBoyAdvance-M", "emu_site": "vba-m.com",
+     "emu_url": "https://github.com/visualboyadvance-m/visualboyadvance-m/releases",
+     "dl": {"repo": "visualboyadvance-m/visualboyadvance-m",
+            "asset": r"^visualboyadvance-m-Win-x86_64\.zip$"}},
+    {"id": "nds", "name": "Nintendo DS",
      "exes": ["melonds.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "melonDS", "emu_site": "melonds.kuribo64.net"},
-    {"id": "gamecube", "name": "GameCube", "exts": [".iso", ".gcm", ".rvz", ".ciso"],
+     "emu_name": "melonDS", "emu_site": "melonds.kuribo64.net",
+     "emu_url": "https://github.com/melonDS-emu/melonDS/releases",
+     "dl": {"repo": "melonDS-emu/melonDS", "asset": r"windows-x86_64\.zip$"}},
+    {"id": "gamecube", "name": "GameCube",
      "exes": ["dolphin.exe"], "args": '"{emu}" -e "{rom}"',
-     "emu_name": "Dolphin", "emu_site": "dolphin-emu.org"},
-    {"id": "wii", "name": "Nintendo Wii", "exts": [".iso", ".wbfs", ".rvz"],
+     "emu_name": "Dolphin", "emu_site": "dolphin-emu.org",
+     "emu_url": "https://dolphin-emu.org/download/", "dl": None,
+     "note": "Dolphin ships as a 7z archive — unzip it manually."},
+    {"id": "wii", "name": "Nintendo Wii",
      "exes": ["dolphin.exe"], "args": '"{emu}" -e "{rom}"',
-     "emu_name": "Dolphin", "emu_site": "dolphin-emu.org"},
-    {"id": "genesis", "name": "Sega Mega Drive", "exts": [".md", ".gen", ".smd", ".bin", ".zip"],
-     "exes": ["blastem.exe", "fusion.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "BlastEm", "emu_site": "retrodev.com/blastem"},
-    {"id": "dreamcast", "name": "Sega Dreamcast", "exts": [".chd", ".gdi", ".cdi"],
+     "emu_name": "Dolphin", "emu_site": "dolphin-emu.org",
+     "emu_url": "https://dolphin-emu.org/download/", "dl": None,
+     "note": "Dolphin ships as a 7z archive — unzip it manually."},
+    {"id": "genesis", "name": "Sega Mega Drive",
+     "exes": ["ares.exe", "blastem.exe", "fusion.exe"], "args": DEFAULT_ARGS,
+     "emu_name": "ares", "emu_site": "ares-emulator.github.io",
+     "emu_url": "https://github.com/ares-emulator/ares/releases",
+     "dl": {"repo": "ares-emulator/ares", "asset": r"^ares-windows-x64\.zip$"}},
+    {"id": "dreamcast", "name": "Sega Dreamcast",
      "exes": ["flycast.exe", "redream.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "Flycast", "emu_site": "flycast.dev"},
-    {"id": "ps1", "name": "PlayStation", "exts": [".cue", ".chd", ".pbp", ".m3u", ".bin", ".img"],
-     "exes": ["duckstation-qt-x64-releaseltcg.exe", "duckstation-qt.exe", "duckstation.exe"],
+     "emu_name": "Flycast", "emu_site": "flycast.dev",
+     "emu_url": "https://github.com/flyinghead/flycast/releases",
+     "dl": {"repo": "flyinghead/flycast", "asset": r"win64.*\.zip$"}},
+    {"id": "ps1", "name": "PlayStation",
+     "exes": ["duckstation-qt-x64-releaseltcg.exe", "duckstation-qt.exe",
+              "duckstation.exe"], "args": DEFAULT_ARGS,
+     "emu_name": "DuckStation", "emu_site": "duckstation.org",
+     "emu_url": "https://github.com/stenzek/duckstation/releases",
+     "dl": {"repo": "stenzek/duckstation",
+            "asset": r"^duckstation-windows-x64-release\.zip$"}},
+    {"id": "ps2", "name": "PlayStation 2",
+     "exes": ["pcsx2-qt.exe", "pcsx2-qtx64-avx2.exe", "pcsx2.exe"],
      "args": DEFAULT_ARGS,
-     "emu_name": "DuckStation", "emu_site": "duckstation.org"},
-    {"id": "ps2", "name": "PlayStation 2", "exts": [".iso", ".chd", ".cso"],
-     "exes": ["pcsx2-qt.exe", "pcsx2-qtx64-avx2.exe", "pcsx2.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "PCSX2", "emu_site": "pcsx2.net"},
-    {"id": "psp", "name": "PlayStation Portable", "exts": [".iso", ".cso", ".chd"],
+     "emu_name": "PCSX2", "emu_site": "pcsx2.net",
+     "emu_url": "https://pcsx2.net/downloads", "dl": None,
+     "note": "PCSX2 ships as a 7z/installer — install manually. Needs a PS2 BIOS."},
+    {"id": "psp", "name": "PlayStation Portable",
      "exes": ["ppssppwindows64.exe", "ppssppwindows.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "PPSSPP", "emu_site": "ppsspp.org"},
-    {"id": "arcade", "name": "Arcade (MAME)", "exts": [".zip", ".7z"],
+     "emu_name": "PPSSPP", "emu_site": "ppsspp.org",
+     "emu_url": "https://github.com/hrydgard/ppsspp/releases",
+     "dl": {"repo": "hrydgard/ppsspp", "asset": r"Windows-x64\.zip$"}},
+    {"id": "arcade", "name": "Arcade (MAME)",
      "exes": ["mame.exe"], "args": '"{emu}" {romname} -rompath "{romdir}"',
-     "emu_name": "MAME", "emu_site": "mamedev.org"},
-    {"id": "atari2600", "name": "Atari 2600", "exts": [".a26", ".bin"],
+     "emu_name": "MAME", "emu_site": "mamedev.org",
+     "emu_url": "https://www.mamedev.org/release.html", "dl": None,
+     "note": "MAME ships as a self-extracting exe — run it into the folder manually."},
+    {"id": "atari2600", "name": "Atari 2600",
      "exes": ["stella.exe"], "args": DEFAULT_ARGS,
-     "emu_name": "Stella", "emu_site": "stella-emu.github.io"},
+     "emu_name": "Stella", "emu_site": "stella-emu.github.io",
+     "emu_url": "https://github.com/stella-emu/stella/releases",
+     "dl": {"repo": "stella-emu/stella", "asset": r"windows\.zip$"}},
+    {"id": "c64", "name": "Commodore 64",
+     "exes": ["x64sc.exe", "x64.exe"], "args": DEFAULT_ARGS,
+     "emu_name": "VICE", "emu_site": "vice-emu.sourceforge.io",
+     "emu_url": "https://vice-emu.sourceforge.io/index.html#download",
+     "dl": {"url": "https://sourceforge.net/projects/vice-emu/files/releases/"
+                   "binaries/windows/GTK3VICE-3.9-win64.zip/download"}},
+    {"id": "amiga", "name": "Commodore Amiga",
+     "exes": ["winuae64.exe", "winuae.exe"], "args": '"{emu}" -0 "{rom}" -G',
+     "emu_name": "WinUAE", "emu_site": "winuae.net",
+     "emu_url": "https://www.winuae.net/download/",
+     "dl": {"url": "https://download.abime.net/winuae/releases/WinUAE6010_x64.zip"},
+     "note": "Needs Amiga Kickstart ROMs configured in WinUAE once. ADF disks "
+             "launch directly; WHDLoad archives (.lha/.rar) need a one-time "
+             "WinUAE setup (Quickstart > set Kickstart, then mount the archive)."},
 ]
 
 SYSTEMS_BY_ID = {s["id"]: s for s in SYSTEMS}
 ART_EXTS = [".png", ".jpg", ".jpeg", ".webp"]
 
+# --- how files are matched to systems -------------------------------------
+UNIQUE_EXTS = {
+    ".nes": "nes", ".fds": "nes", ".sfc": "snes", ".smc": "snes",
+    ".z64": "n64", ".n64": "n64", ".v64": "n64",
+    ".gb": "gb", ".gbc": "gb", ".gba": "gba", ".nds": "nds",
+    ".gcm": "gamecube", ".rvz": "gamecube", ".ciso": "gamecube",
+    ".wbfs": "wii", ".md": "genesis", ".gen": "genesis", ".smd": "genesis",
+    ".gdi": "dreamcast", ".cdi": "dreamcast",
+    ".pbp": "ps1", ".m3u": "ps1", ".cso": "psp", ".a26": "atari2600",
+    ".d64": "c64", ".t64": "c64", ".prg": "c64", ".tap": "c64", ".crt": "c64",
+    ".adf": "amiga", ".lha": "amiga", ".ipf": "amiga",
+}
+AMBIG_EXTS = {
+    ".zip": ["arcade", "nes", "snes", "n64", "gb", "gba", "genesis", "atari2600"],
+    ".7z": ["arcade"],
+    ".iso": ["ps2", "psp", "gamecube", "wii"],
+    ".bin": ["genesis", "atari2600", "ps1", "c64"],
+    ".chd": ["ps1", "ps2", "dreamcast", "psp"],
+    ".cue": ["ps1", "dreamcast"],
+    ".img": ["ps1"],
+    ".rar": ["amiga"],
+}
+# Folder-name hints (checked deepest folder first; more specific systems first)
+HINTS = {
+    "gba": ["gba", "game boy advance", "gameboy advance"],
+    "gb": ["gb", "gbc", "game boy", "gameboy"],
+    "n64": ["n64", "nintendo 64", "nintendo64"],
+    "nes": ["nes", "famicom"],
+    "snes": ["snes", "super nintendo", "super famicom"],
+    "nds": ["nds", "nintendo ds"],
+    "gamecube": ["gamecube", "ngc"],
+    "wii": ["wii"],
+    "genesis": ["genesis", "mega drive", "megadrive"],
+    "dreamcast": ["dreamcast"],
+    "ps2": ["ps2", "playstation 2"],
+    "ps1": ["ps1", "psx", "psone", "playstation"],
+    "psp": ["psp"],
+    "arcade": ["arcade", "mame", "neogeo", "fba"],
+    "atari2600": ["atari", "2600"],
+    "c64": ["c64", "commodore 64", "commodore64"],
+    "amiga": ["amiga", "whdload"],
+}
+SKIP_DIRS = {"art", "covers", "screens", "screenshots", "emulators"}
+
 _lock = threading.Lock()
 
 
+def exts_for(sysid):
+    e = [x for x, s in UNIQUE_EXTS.items() if s == sysid]
+    e += [x for x, c in AMBIG_EXTS.items() if sysid in c]
+    return sorted(set(e))
+
+
 def default_config():
-    return {"library_root": "C:\\RetroShelf", "overrides": {}, "stats": {}}
+    return {
+        "library_root": "C:\\RetroShelf\\games",
+        "emulators_root": "C:\\RetroShelf\\emulators",
+        "art_root": "C:\\RetroShelf\\art",
+        "overrides": {}, "stats": {},
+    }
 
 
 def load_config():
@@ -119,11 +228,11 @@ def find_emulator(sysdef, cfg):
     if override:
         p = Path(override)
         return p if p.is_file() else None
-    emu_dir = Path(cfg["library_root"]) / "emulators" / sysdef["id"]
+    emu_dir = Path(cfg["emulators_root"]) / sysdef["id"]
     if not emu_dir.is_dir():
         return None
     wanted = [n.lower() for n in sysdef["exes"]]
-    exes = [p for p in emu_dir.rglob("*.exe")]
+    exes = list(emu_dir.rglob("*.exe"))
     for p in exes:
         if p.name.lower() in wanted:
             return p
@@ -132,15 +241,170 @@ def find_emulator(sysdef, cfg):
     return None
 
 
+# --- scanning ---------------------------------------------------------------
+
+TAG_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
+
+
+def clean_name(stem):
+    n = TAG_RE.sub("", stem)
+    n = re.sub(r"_v\d[\w.]*.*$", "", n)          # Amiga _v1.2_AGA_0044 suffixes
+    n = re.sub(r"_(s)(?=\s|$|_)", r"'\1", n)     # Bug_s -> Bug's
+    n = n.replace("_", " ")
+    n = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", n)  # AlienBreed2 -> Alien Breed 2
+    n = re.sub(r"\s+", " ", n).strip(" -.")
+    return n or stem
+
+
+def _tok_match(tok, part):
+    i = part.find(tok)
+    while i != -1:
+        pre_ok = i == 0 or not part[i - 1].isalnum()
+        j = i + len(tok)
+        post_ok = (j >= len(part) or not part[j].isalnum()
+                   or (tok[-1].isdigit() and part[j].isalpha()))
+        if pre_ok and post_ok:
+            return True
+        i = part.find(tok, i + 1)
+    return False
+
+
+def path_hints(parts):
+    """System ids hinted by folder names, deepest folder first."""
+    out = []
+    for part in reversed([p.lower() for p in parts]):
+        for sysid, toks in HINTS.items():
+            if sysid not in out and any(_tok_match(t, part) for t in toks):
+                out.append(sysid)
+    return out
+
+
+_zip_cache = {}
+
+
+def zip_peek(path):
+    """Classify a .zip by what's inside it."""
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return None
+    if key in _zip_cache:
+        return _zip_cache[key]
+    res = None
+    try:
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist()[:40]:
+                e = Path(n).suffix.lower()
+                if e in UNIQUE_EXTS:
+                    res = UNIQUE_EXTS[e]
+                    break
+    except (OSError, zipfile.BadZipFile):
+        res = None
+    _zip_cache[key] = res
+    return res
+
+
+def classify(parts, ext, path):
+    if ext in UNIQUE_EXTS:
+        return UNIQUE_EXTS[ext]
+    cands = AMBIG_EXTS.get(ext)
+    if not cands:
+        return None
+    for h in path_hints(parts):
+        if h in cands:
+            return h
+    if ext == ".zip":
+        peeked = zip_peek(path)
+        if peeked:
+            return peeked
+    return cands[0]
+
+
+def scan_all(cfg):
+    """Walk library_root recursively, classify every game file."""
+    root = Path(cfg["library_root"])
+    games = {s["id"]: [] for s in SYSTEMS}
+    if not root.is_dir():
+        return games
+
+    listing_cache = {}
+
+    def listdir(d):
+        d = str(d)
+        if d not in listing_cache:
+            try:
+                listing_cache[d] = {n.lower() for n in os.listdir(d)}
+            except OSError:
+                listing_cache[d] = set()
+        return listing_cache[d]
+
+    def has_art(sysid, dirpath, stem, kind):
+        if kind == "screen":
+            dirs = [dirpath / "screens", dirpath / "screenshots",
+                    Path(cfg["art_root"]) / sysid / "screens"]
+        else:
+            dirs = [dirpath, dirpath / "art", dirpath / "covers",
+                    Path(cfg["art_root"]) / sysid]
+        sl = stem.lower()
+        for d in dirs:
+            names = listdir(d)
+            for ext in ART_EXTS:
+                if sl + ext in names:
+                    return True
+        return False
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS]
+        dp = Path(dirpath)
+        try:
+            rel_parts = dp.relative_to(root).parts
+        except ValueError:
+            rel_parts = ()
+        cue_stems = {Path(f).stem.lower() for f in filenames
+                     if Path(f).suffix.lower() in (".cue", ".gdi", ".m3u")}
+        for fname in filenames:
+            ext = Path(fname).suffix.lower()
+            stem = Path(fname).stem
+            if ext in (".bin", ".img", ".iso") and stem.lower() in cue_stems:
+                continue
+            p = dp / fname
+            sysid = classify(rel_parts, ext, p)
+            if not sysid:
+                continue
+            games[sysid].append({
+                "name": clean_name(stem),
+                "file": str(p),
+                "art": has_art(sysid, dp, stem, "cover"),
+                "shot": has_art(sysid, dp, stem, "screen"),
+            })
+    for lst in games.values():
+        lst.sort(key=lambda g: g["name"].lower())
+    return games
+
+
+_scan_cache = {"key": None, "time": 0.0, "data": None}
+SCAN_TTL = 120
+
+
+def get_games(cfg, force=False):
+    key = (cfg["library_root"], cfg["art_root"])
+    now = time.time()
+    if (not force and _scan_cache["key"] == key
+            and now - _scan_cache["time"] < SCAN_TTL):
+        return _scan_cache["data"]
+    data = scan_all(cfg)
+    _scan_cache.update(key=key, time=now, data=data)
+    return data
+
+
 def find_art(sysdef, rom_path, cfg, kind="cover"):
     stem = rom_path.stem
-    root = Path(cfg["library_root"])
     if kind == "screen":
         dirs = [rom_path.parent / "screens", rom_path.parent / "screenshots",
-                root / "art" / sysdef["id"] / "screens"]
+                Path(cfg["art_root"]) / sysdef["id"] / "screens"]
     else:
-        dirs = [rom_path.parent, rom_path.parent / "art", rom_path.parent / "covers",
-                root / "art" / sysdef["id"]]
+        dirs = [rom_path.parent, rom_path.parent / "art",
+                rom_path.parent / "covers", Path(cfg["art_root"]) / sysdef["id"]]
     for d in dirs:
         for ext in ART_EXTS:
             c = d / (stem + ext)
@@ -149,56 +413,115 @@ def find_art(sysdef, rom_path, cfg, kind="cover"):
     return None
 
 
-def scan_games(sysdef, cfg):
-    roms_dir = Path(cfg["library_root"]) / "roms" / sysdef["id"]
-    games = []
-    if not roms_dir.is_dir():
-        return games, roms_dir
-    exts = set(sysdef["exts"])
-    files = sorted(roms_dir.rglob("*"), key=lambda p: p.name.lower())
-    stems_with_cue = {p.stem.lower() for p in files if p.suffix.lower() in (".cue", ".gdi", ".m3u")}
-    for p in files:
-        if not p.is_file() or p.suffix.lower() not in exts:
-            continue
-        if p.parent.name.lower() in ("art", "covers", "screens", "screenshots"):
-            continue
-        # hide raw discs that already have a cue/gdi/m3u pointing at them
-        if p.suffix.lower() in (".bin", ".img", ".iso") and p.stem.lower() in stems_with_cue:
-            continue
-        stat = cfg["stats"].get(str(p), {})
-        games.append({
-            "name": p.stem,
-            "file": str(p),
-            "art": find_art(sysdef, p, cfg) is not None,
-            "shot": find_art(sysdef, p, cfg, "screen") is not None,
-            "plays": stat.get("plays", 0),
-            "last": stat.get("last", 0),
-        })
-    return games, roms_dir
+# --- emulator auto-download -------------------------------------------------
+
+DOWNLOADS = {}
+_dl_lock = threading.Lock()
+DL_ACTIVE = ("resolving", "downloading", "extracting")
 
 
-def build_state(cfg):
+def _set_dl(sysid, **kw):
+    with _dl_lock:
+        DOWNLOADS.setdefault(sysid, {}).update(kw)
+
+
+def _resolve_dl_url(spec):
+    if "url" in spec:
+        return spec["url"]
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{spec['repo']}/releases/latest",
+        headers={"User-Agent": "RetroShelf", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        rel = json.load(r)
+    pat = re.compile(spec["asset"], re.I)
+    for a in rel.get("assets", []):
+        if pat.search(a["name"]):
+            return a["browser_download_url"]
+    raise RuntimeError("no matching release asset found")
+
+
+def _download_worker(sysdef, emulators_root):
+    sysid = sysdef["id"]
+    try:
+        _set_dl(sysid, status="resolving", pct=0, msg="")
+        url = _resolve_dl_url(sysdef["dl"])
+        dest = Path(emulators_root) / sysid
+        dest.mkdir(parents=True, exist_ok=True)
+        tmp = dest / "_retroshelf_download.zip"
+        req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            _set_dl(sysid, status="downloading")
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if total:
+                    _set_dl(sysid, pct=int(got * 100 / total))
+        _set_dl(sysid, status="extracting", pct=100)
+        droot = dest.resolve()
+        with zipfile.ZipFile(tmp) as z:
+            for m in z.infolist():
+                tgt = (dest / m.filename).resolve()
+                if tgt == droot or droot in tgt.parents:
+                    z.extract(m, dest)
+        tmp.unlink(missing_ok=True)
+        _set_dl(sysid, status="done", msg="installed")
+    except Exception as e:  # report any failure to the UI
+        _set_dl(sysid, status="error", msg=str(e))
+
+
+def start_download(sysid, cfg):
+    sysdef = SYSTEMS_BY_ID.get(sysid)
+    if not sysdef or not sysdef.get("dl"):
+        return False, "no auto-download for this system"
+    if DOWNLOADS.get(sysid, {}).get("status") in DL_ACTIVE:
+        return True, "already downloading"
+    threading.Thread(target=_download_worker,
+                     args=(sysdef, cfg["emulators_root"]), daemon=True).start()
+    return True, "download started"
+
+
+# --- state / launch ---------------------------------------------------------
+
+def build_state(cfg, rescan=False):
+    games = get_games(cfg, force=rescan)
     systems = []
     for sysdef in SYSTEMS:
         emu = find_emulator(sysdef, cfg)
-        games, roms_dir = scan_games(sysdef, cfg)
         override = cfg["overrides"].get(sysdef["id"], {})
+        gl = []
+        for g in games.get(sysdef["id"], []):
+            st = cfg["stats"].get(g["file"], {})
+            gl.append({**g, "plays": st.get("plays", 0), "last": st.get("last", 0)})
         systems.append({
             "id": sysdef["id"],
             "name": sysdef["name"],
-            "exts": sysdef["exts"],
+            "exts": exts_for(sysdef["id"]),
             "emu_name": sysdef["emu_name"],
             "emu_site": sysdef["emu_site"],
+            "emu_url": sysdef["emu_url"],
+            "dl": "auto" if sysdef.get("dl") else "manual",
+            "note": sysdef.get("note", ""),
             "emu_found": emu is not None,
             "emu_path": str(emu) if emu else "",
             "emu_override": override.get("emu_path", ""),
             "args": override.get("args", sysdef["args"]),
-            "default_args": sysdef["args"],
-            "roms_dir": str(roms_dir),
-            "emu_dir": str(Path(cfg["library_root"]) / "emulators" / sysdef["id"]),
-            "games": games,
+            "emu_dir": str(Path(cfg["emulators_root"]) / sysdef["id"]),
+            "games": gl,
         })
-    return {"library_root": cfg["library_root"], "systems": systems}
+    with _dl_lock:
+        downloads = {k: dict(v) for k, v in DOWNLOADS.items()}
+    return {
+        "library_root": cfg["library_root"],
+        "emulators_root": cfg["emulators_root"],
+        "art_root": cfg["art_root"],
+        "downloads": downloads,
+        "systems": systems,
+    }
 
 
 def launch_game(cfg, system_id, rom):
@@ -210,7 +533,7 @@ def launch_game(cfg, system_id, rom):
     try:
         rom_path.resolve().relative_to(root)
     except ValueError:
-        return False, "rom is outside the library folder"
+        return False, "rom is outside the games folder"
     if not rom_path.is_file():
         return False, "rom file not found"
     emu = find_emulator(sysdef, cfg)
@@ -234,12 +557,9 @@ def launch_game(cfg, system_id, rom):
 
 
 def create_layout(cfg):
-    root = Path(cfg["library_root"])
-    for sub in ("roms", "emulators", "art"):
-        for sysdef in SYSTEMS:
-            (root / sub / sysdef["id"]).mkdir(parents=True, exist_ok=True)
     for sysdef in SYSTEMS:
-        (root / "art" / sysdef["id"] / "screens").mkdir(parents=True, exist_ok=True)
+        (Path(cfg["emulators_root"]) / sysdef["id"]).mkdir(parents=True, exist_ok=True)
+        (Path(cfg["art_root"]) / sysdef["id"] / "screens").mkdir(parents=True, exist_ok=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -268,8 +588,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif parsed.path == "/api/state":
+            qs = urllib.parse.parse_qs(parsed.query)
+            rescan = qs.get("rescan", ["0"])[0] == "1"
             with _lock:
-                self._json(build_state(load_config()))
+                self._json(build_state(load_config(), rescan=rescan))
         elif parsed.path == "/api/art":
             qs = urllib.parse.parse_qs(parsed.query)
             system_id = qs.get("system", [""])[0]
@@ -306,11 +628,15 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/launch":
                 ok, msg = launch_game(cfg, body.get("system", ""), body.get("rom", ""))
                 self._json({"ok": ok, "msg": msg})
+            elif parsed.path == "/api/download":
+                ok, msg = start_download(body.get("id", ""), cfg)
+                self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/settings":
-                root = body.get("library_root", "").strip()
-                if root:
-                    cfg["library_root"] = root
-                    save_config(cfg)
+                for key in ("library_root", "emulators_root", "art_root"):
+                    val = body.get(key, "").strip()
+                    if val:
+                        cfg[key] = val
+                save_config(cfg)
                 self._json({"ok": True, "msg": "saved"})
             elif parsed.path == "/api/system":
                 system_id = body.get("id", "")
@@ -365,6 +691,8 @@ body {
   color: var(--text); font-family: VT323, monospace; font-size: 19px;
   min-height: 100vh;
 }
+a { color: var(--amber2); }
+a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
 /* ---- animated CRT layers ---- */
 #gridfloor {
   position: fixed; bottom: -6vh; left: -50%; width: 200%; height: 44vh;
@@ -450,14 +778,16 @@ header { position: sticky; top: 0; z-index: 10;
   max-width: 1020px; margin: 0 auto; }
 .chip { border: 1px solid var(--line); border-radius: 4px; padding: 4px 13px;
   font-size: 18px; color: var(--text); cursor: pointer; background: rgba(0,0,0,.3);
-  white-space: nowrap; transition: box-shadow .12s, border-color .12s; }
+  white-space: nowrap; transition: box-shadow .12s, border-color .12s;
+  display: flex; align-items: center; }
 .chip:hover { border-color: var(--dim); }
 .chip.on { background: var(--amber); color: #0a0906; border-color: var(--amber);
   box-shadow: 0 0 14px rgba(255,176,0,.5); }
-.chip span { color: var(--muted); font-size: 16px; margin-left: 5px; }
-.chip.on span { color: #4d3500; }
-.dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
-  margin-right: 7px; box-shadow: 0 0 6px currentColor; }
+.chip span.n { color: var(--muted); font-size: 16px; margin-left: 5px; }
+.chip.on span.n { color: #4d3500; }
+.slogo { display: inline-flex; margin-right: 7px; flex-shrink: 0;
+  filter: drop-shadow(0 0 3px rgba(255,255,255,.2)); }
+.slogo svg { width: 100%; height: 100%; }
 /* ---- game list ---- */
 main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
   position: relative; z-index: 1; }
@@ -485,7 +815,8 @@ main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   transition: color .12s, text-shadow .12s; }
 .row:hover .info .nm { color: var(--amber2); text-shadow: 0 0 10px rgba(255,176,0,.5); }
-.info .sub { font-size: 18px; color: var(--muted); margin-top: 3px; }
+.info .sub { font-size: 18px; color: var(--muted); margin-top: 3px;
+  display: flex; align-items: center; }
 .playbtn { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--amber);
   color: var(--amber); background: rgba(0,0,0,.4); display: flex; align-items: center;
   justify-content: center; font-size: 17px; flex-shrink: 0; opacity: 0;
@@ -495,6 +826,7 @@ main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
   0%, 100% { box-shadow: 0 0 6px rgba(255,176,0,.5); }
   50% { box-shadow: 0 0 20px rgba(255,176,0,.9); }
 }
+.more { text-align: center; color: var(--muted); padding: 14px; font-size: 18px; }
 .empty { text-align: center; padding: 80px 20px; color: var(--muted); line-height: 2;
   background: rgba(0,0,0,.25); border: 1px dashed var(--line); border-radius: 6px;
   font-size: 20px; }
@@ -514,10 +846,14 @@ main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
   text-shadow: 0 0 8px rgba(57,255,136,.5); }
 .pill.bad { border-color: var(--red); color: var(--red);
   text-shadow: 0 0 8px rgba(255,85,68,.5); animation: pulse 1.6s steps(2) infinite; }
+.pill.dlp { border-color: var(--amber); color: var(--amber);
+  text-shadow: 0 0 8px rgba(255,176,0,.5); animation: pulse 1s steps(2) infinite; }
 .dim { color: var(--muted); font-size: 18px; margin-top: 8px; line-height: 1.5;
   word-break: break-all; }
 .dim b { color: var(--text); font-weight: 400; }
+.err { color: var(--red); font-size: 17px; margin-left: 10px; }
 .fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.flabel { color: var(--dim); font-size: 17px; width: 100%; margin: 8px 0 -8px; }
 input.cfg { background: rgba(0,0,0,.45); border: 1px solid var(--line); border-radius: 4px;
   padding: 7px 12px; font: inherit; font-size: 18px; color: var(--amber2);
   flex: 1; min-width: 220px; outline: none; caret-color: var(--amber); }
@@ -576,17 +912,45 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 let state = null;
 let tab = 'games';
 let sel = 'all';
+let shown = 400;
 
-const SYSCOLORS = {
-  nes: '#e60012', snes: '#7b5aa6', n64: '#009e60', gb: '#8b956d',
-  gba: '#5c67c6', nds: '#7f8ea3', gamecube: '#6a5fc1', wii: '#3aa6dd',
-  genesis: '#0060a8', dreamcast: '#f0762f', ps1: '#4f5bd5', ps2: '#2a3b8f',
-  psp: '#4a4f57', arcade: '#d81b60', atari2600: '#b7410e'
+/* per-system colour, short label, icon shape */
+const META = {
+  nes:       ['#e60012', 'NES',   'cart'],
+  snes:      ['#7b5aa6', 'SNES',  'cart'],
+  n64:       ['#009e60', 'N64',   'cart'],
+  gb:        ['#8b956d', 'GB',    'hand'],
+  gba:       ['#5c67c6', 'GBA',   'hand'],
+  nds:       ['#7f8ea3', 'DS',    'hand'],
+  gamecube:  ['#6a5fc1', 'GC',    'disc'],
+  wii:       ['#3aa6dd', 'WII',   'disc'],
+  genesis:   ['#0060a8', 'MD',    'cart'],
+  dreamcast: ['#f0762f', 'DC',    'disc'],
+  ps1:       ['#4f5bd5', 'PS1',   'disc'],
+  ps2:       ['#2a3b8f', 'PS2',   'disc'],
+  psp:       ['#8a8f98', 'PSP',   'hand'],
+  arcade:    ['#d81b60', 'ARC',   'arc'],
+  atari2600: ['#b7410e', '2600',  'cart'],
+  c64:       ['#a97142', 'C64',   'comp'],
+  amiga:     ['#d33f49', 'AMIGA', 'comp']
 };
-function sysColor(id) { return SYSCOLORS[id] || '#9a8a5c'; }
+const ICONS = {
+  cart: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M4 3h16v10h-3v5H7v-5H4z"/><rect x="7.5" y="6" width="9" height="3.5" fill="rgba(0,0,0,.45)"/></svg>`,
+  disc: c => `<svg viewBox="0 0 24 24" fill="${c}"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.6" fill="rgba(0,0,0,.6)"/></svg>`,
+  hand: c => `<svg viewBox="0 0 24 24" fill="${c}"><rect x="6" y="2" width="12" height="20" rx="2"/><rect x="8" y="4.5" width="8" height="7" fill="rgba(0,0,0,.45)"/><circle cx="10" cy="16.5" r="1.7" fill="rgba(0,0,0,.45)"/><circle cx="14.5" cy="17.5" r="1.3" fill="rgba(0,0,0,.45)"/></svg>`,
+  arc:  c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M5 2h14v7l-2 3v10H7V12L5 9z"/><rect x="8" y="4.5" width="8" height="4" fill="rgba(0,0,0,.45)"/><circle cx="10" cy="16" r="1.2" fill="rgba(0,0,0,.45)"/><rect x="13" y="15.2" width="4" height="1.6" fill="rgba(0,0,0,.45)"/></svg>`,
+  comp: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M3 8h18v7l1.5 5H1.5L3 15z"/><rect x="4.5" y="16.5" width="15" height="1.8" fill="rgba(0,0,0,.45)"/><rect x="5" y="9.8" width="14" height="3.4" fill="rgba(0,0,0,.3)"/></svg>`
+};
+function sysColor(id) { return (META[id] || ['#9a8a5c'])[0]; }
+function sysLabel(id) { return (META[id] || [0, id.toUpperCase()])[1]; }
+function sysLogo(id, size) {
+  const m = META[id];
+  if (!m) return '';
+  return `<span class="slogo" style="width:${size}px;height:${size}px">${ICONS[m[2]](m[0])}</span>`;
+}
 
 /* boot sequence */
-const BOOT = 'RETROSHELF BIOS v3.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING ROM LIBRARY ...\n\nREADY.';
+const BOOT = 'RETROSHELF BIOS v4.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING GAME LIBRARY ...\n\nREADY.';
 (function boot() {
   const el = document.getElementById('boottext');
   const box = document.getElementById('boot');
@@ -603,8 +967,8 @@ const BOOT = 'RETROSHELF BIOS v3.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK
   }, 16);
 })();
 
-async function refresh() {
-  state = await (await fetch('/api/state')).json();
+async function refresh(rescan) {
+  state = await (await fetch('/api/state' + (rescan ? '?rescan=1' : ''))).json();
   render();
 }
 
@@ -645,16 +1009,37 @@ async function launch(sysId, rom, name) {
   if (!r.ok) {
     hideLoader();
     snack('ERROR: ' + r.msg);
+    if (r.msg.startsWith('no emulator')) setTab('systems');
   } else {
     setTimeout(hideLoader, 1750);
-    setTimeout(refresh, 900);
+    setTimeout(() => refresh(), 900);
   }
+}
+
+let _poll = null;
+function pollDownloads() {
+  if (_poll) return;
+  _poll = setInterval(async () => {
+    await refresh();
+    const act = Object.values(state.downloads || {})
+      .some(d => ['resolving', 'downloading', 'extracting'].includes(d.status));
+    if (!act) { clearInterval(_poll); _poll = null; refresh(); }
+  }, 1200);
+}
+
+async function download(id) {
+  const r = await (await fetch('/api/download', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id: id})})).json();
+  snack(r.ok ? 'DOWNLOADING ' + sysLabel(id) + ' EMULATOR' : 'ERROR: ' + r.msg);
+  if (r.ok) pollDownloads();
 }
 
 function allGames() {
   const out = [];
   for (const s of state.systems)
     for (const g of s.games) out.push({...g, sysId: s.id, sysName: s.name});
+  out.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
   return out;
 }
 
@@ -678,10 +1063,11 @@ function render() {
   if (tab === 'games') {
     const withGames = state.systems.filter(s => s.games.length);
     chips.innerHTML =
-      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';render()">ALL<span>${allGames().length}</span></div>` +
+      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';shown=400;render()">ALL<span class="n">${allGames().length}</span></div>` +
       withGames.map(s =>
-        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()"><span class="dot" style="background:${sysColor(s.id)};color:${sysColor(s.id)}"></span>${esc(s.name)}<span>${s.games.length}</span></div>`
-      ).join('');
+        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';shown=400;render()">${sysLogo(s.id,17)}${esc(s.name)}<span class="n">${s.games.length}</span></div>`
+      ).join('') +
+      `<div class="chip" onclick="snack('RESCANNING...');refresh(true)">⟳ RESCAN</div>`;
 
     let games = sel === 'all' ? allGames()
       : (state.systems.find(s => s.id === sel) || {games:[]}).games
@@ -694,10 +1080,13 @@ function render() {
     if (!games.length) {
       content.innerHTML = `<div class="empty">
         <div class="big">INSERT CARTRIDGE</div>
-        Drop your rom files into <code>${esc(state.library_root)}\\roms\\&lt;system&gt;\\</code><br>
-        then refresh this page. The <b>SYSTEMS</b> tab lists every folder name.</div>`;
+        No games found in <code>${esc(state.library_root)}</code><br>
+        Point RetroShelf at your games folder in the <b>SETTINGS</b> tab &mdash;
+        it scans every subfolder automatically.</div>`;
       return;
     }
+    const total = games.length;
+    games = games.slice(0, shown);
     content.innerHTML = games.map(g => {
       const cover = g.art
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
@@ -713,26 +1102,45 @@ function render() {
         <div class="cover"${coverBg}>${cover}</div>
         <div class="shot">${shot}</div>
         <div class="info"><div class="nm">${esc(g.name)}</div>
-          <div class="sub">${esc(sub)}</div></div>
+          <div class="sub">${sysLogo(g.sysId,15)}${esc(sub)}</div></div>
         <div class="playbtn">▶</div></div>`;
-    }).join('');
+    }).join('') + (total > shown
+      ? `<div class="more"><button class="outlined" onclick="shown+=400;render()">SHOW MORE (${total - shown} left)</button></div>` : '');
 
   } else if (tab === 'systems') {
     count.textContent = state.systems.filter(s => s.emu_found).length + ' of ' +
       state.systems.length + ' emulators ready';
     content.innerHTML = state.systems.map(s => {
-      const status = s.emu_found
-        ? `<span class="pill ok">READY</span>`
-        : `<span class="pill bad">EMULATOR MISSING</span>`;
-      const detail = s.emu_found
-        ? `Using <b>${esc(s.emu_path)}</b>`
-        : `Download <b>${esc(s.emu_name)}</b> from <b>${esc(s.emu_site)}</b> and unzip it into
-           <b>${esc(s.emu_dir)}\\</b> &mdash; the exe is picked up automatically.`;
+      const d = (state.downloads || {})[s.id];
+      const busy = d && ['resolving', 'downloading', 'extracting'].includes(d.status);
+      let status;
+      if (s.emu_found) status = `<span class="pill ok">READY</span>`;
+      else if (busy) {
+        const lbl = d.status === 'downloading' ? 'DOWNLOADING ' + (d.pct || 0) + '%'
+                  : d.status.toUpperCase() + '...';
+        status = `<span class="pill dlp">${lbl}</span>`;
+      } else status = `<span class="pill bad">EMULATOR MISSING</span>`;
+      const err = (d && d.status === 'error')
+        ? `<span class="err">DOWNLOAD FAILED: ${esc(d.msg)}</span>` : '';
+      let detail;
+      const link = `<a href="${s.emu_url}" target="_blank">${esc(s.emu_site)}</a>`;
+      if (s.emu_found) detail = `Using <b>${esc(s.emu_path)}</b>`;
+      else if (s.dl === 'auto')
+        detail = `Needs <b>${esc(s.emu_name)}</b> &mdash; click DOWNLOAD and RetroShelf
+          installs it into <b>${esc(s.emu_dir)}\\</b>, or get it yourself from ${link}.`;
+      else
+        detail = `Needs <b>${esc(s.emu_name)}</b> &mdash; download it from ${link}
+          and unzip into <b>${esc(s.emu_dir)}\\</b>.`;
+      const note = s.note ? `<div class="dim">▲ ${esc(s.note)}</div>` : '';
+      const dlbtn = (!s.emu_found && !busy && s.dl === 'auto')
+        ? `<button class="filled" onclick="download('${s.id}')">DOWNLOAD ${esc(s.emu_name.toUpperCase())}</button>` : '';
       return `<div class="card">
-        <div class="head"><span class="dot" style="background:${sysColor(s.id)};color:${sysColor(s.id)}"></span><span class="nm">${esc(s.name)}</span>${status}</div>
-        <div class="dim">${detail}<br>
-          Games go in <b>${esc(s.roms_dir)}\\</b> (${esc(s.exts.join(' '))})</div>
+        <div class="head">${sysLogo(s.id,22)}<span class="nm">${esc(s.name)}</span>${status}${err}</div>
+        <div class="dim">${detail}<br>Game files: <b>${esc(s.exts.join(' '))}</b>
+          &middot; ${s.games.length} found</div>
+        ${note}
         <div class="fields">
+          ${dlbtn}
           <input class="cfg" id="ep-${s.id}" placeholder="custom emulator exe path (optional)"
              value="${esc(s.emu_override)}">
           <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}"
@@ -744,26 +1152,32 @@ function render() {
   } else {
     count.textContent = '';
     content.innerHTML = `<div class="card">
-        <div class="head"><span class="nm">Library folder</span></div>
+        <div class="head"><span class="nm">Folders</span></div>
+        <div class="flabel">GAMES FOLDER (scanned recursively, subfolders included)</div>
+        <div class="fields"><input class="cfg" id="root" value="${esc(state.library_root)}"></div>
+        <div class="flabel">EMULATORS FOLDER (one subfolder per system)</div>
+        <div class="fields"><input class="cfg" id="emuroot" value="${esc(state.emulators_root)}"></div>
+        <div class="flabel">ART FOLDER (covers + screenshots)</div>
+        <div class="fields"><input class="cfg" id="artroot" value="${esc(state.art_root)}"></div>
         <div class="fields">
-          <input class="cfg" id="root" value="${esc(state.library_root)}">
           <button class="filled" onclick="saveSettings()">SAVE &amp; RESCAN</button>
           <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
         </div></div>
       <div class="card howto">
         <h3>HOW IT WORKS</h3>
-        RetroShelf scans one library folder. Inside it:<br>
-        <code>roms\\&lt;system&gt;\\</code> &mdash; your game files (subfolders are fine)<br>
-        <code>emulators\\&lt;system&gt;\\</code> &mdash; the emulator, unzipped; the exe is found automatically<br>
-        <code>art\\&lt;system&gt;\\</code> &mdash; cover images named exactly like the rom file<br>
-        <code>art\\&lt;system&gt;\\screens\\</code> &mdash; gameplay screenshots, same naming
-        <h3>ART SHORTCUTS</h3>
-        A cover can also sit right next to the rom (same name, .png/.jpg), or in an
-        <code>art\\</code> / <code>covers\\</code> subfolder beside it. Screenshots can sit in a
-        <code>screens\\</code> or <code>screenshots\\</code> subfolder next to the roms.
-        <h3>LAUNCHING</h3>
-        Click a game and it opens in the matching emulator. The SYSTEMS tab lets you
-        point at a custom exe or tweak launch arguments per system.
+        RetroShelf scans the games folder recursively and works out each game's
+        system from its file extension, with folder names as hints
+        (a folder with "n64" or "amiga" in the name tips the balance for
+        ambiguous files like .zip / .iso / .bin / .rar).
+        <h3>EMULATORS</h3>
+        The SYSTEMS tab shows every system: one-click DOWNLOAD where the emulator
+        ships as a plain zip (fetched from its official releases), or a link to
+        the download page where it needs a manual install. Emulators land in
+        <code>emulators\\&lt;system&gt;\\</code> and the exe is found automatically.
+        <h3>ART</h3>
+        Covers: image named like the rom, next to it, or in
+        <code>art\\&lt;system&gt;\\</code>. Screenshots: same name in a
+        <code>screens\\</code> subfolder or <code>art\\&lt;system&gt;\\screens\\</code>.
       </div>`;
   }
 }
@@ -779,9 +1193,12 @@ async function saveSystem(id) {
 
 async function saveSettings() {
   await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({library_root: document.getElementById('root').value})});
-  snack('SAVED');
-  refresh();
+    body: JSON.stringify({
+      library_root: document.getElementById('root').value,
+      emulators_root: document.getElementById('emuroot').value,
+      art_root: document.getElementById('artroot').value})});
+  snack('SAVED - RESCANNING...');
+  refresh(true);
 }
 
 async function mkdirs() {
