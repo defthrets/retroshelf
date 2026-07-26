@@ -359,17 +359,18 @@ body { background: #fff; color: var(--text);
        font-family: Roboto, Arial, sans-serif; font-size: 14px; }
 header { position: sticky; top: 0; z-index: 10; background: #fff; }
 .bar { display: flex; align-items: center; gap: 24px; padding: 14px 24px 8px; }
-.logo { font-size: 24px; font-weight: 500; letter-spacing: -.5px; white-space: nowrap;
+.logo { font-size: 22px; font-weight: 400; color: var(--sub); white-space: nowrap;
         cursor: pointer; user-select: none; }
-.searchwrap { flex: 1; max-width: 640px; position: relative; }
+.logo b { font-weight: 500; color: var(--text); }
+.searchwrap { flex: 1; max-width: 560px; position: relative; }
 #search {
-  width: 100%; height: 44px; border: 1px solid var(--line); border-radius: 22px;
-  padding: 0 20px 0 48px; font: inherit; font-size: 16px; color: var(--text);
-  outline: none; background: #fff;
+  width: 100%; height: 46px; border: none; border-radius: 24px;
+  padding: 0 20px 0 52px; font: inherit; font-size: 15px; color: var(--text);
+  outline: none; background: #eaf1fb;
 }
-#search:hover, #search:focus { box-shadow: 0 1px 6px rgba(32,33,36,.24); border-color: transparent; }
-.searchwrap svg { position: absolute; left: 16px; top: 12px; width: 20px; height: 20px;
-                  fill: #9aa0a6; }
+#search:focus { background: #fff; box-shadow: 0 1px 4px rgba(32,33,36,.28); }
+.searchwrap svg { position: absolute; left: 18px; top: 13px; width: 20px; height: 20px;
+                  fill: var(--sub); }
 #count { color: var(--sub); font-size: 13px; margin-left: auto; white-space: nowrap; }
 .tabs { display: flex; gap: 8px; padding: 0 24px; border-bottom: 1px solid var(--line2); }
 .tabs button {
@@ -475,13 +476,7 @@ button.outlined:hover { background: #f6f9fe; }
 <body>
 <header>
   <div class="bar">
-    <div class="logo" onclick="setTab('games')">
-      <span style="color:#4285f4">R</span><span style="color:#ea4335">e</span><span
-       style="color:#fbbc05">t</span><span style="color:#4285f4">r</span><span
-       style="color:#34a853">o</span><span style="color:#ea4335">S</span><span
-       style="color:#4285f4">h</span><span style="color:#fbbc05">e</span><span
-       style="color:#34a853">l</span><span style="color:#ea4335">f</span>
-    </div>
+    <div class="logo" onclick="setTab('games')"><b>Retro</b>Shelf</div>
     <div class="searchwrap">
       <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
       <input id="search" placeholder="Search your games" oninput="render()" autocomplete="off">
