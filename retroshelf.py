@@ -347,166 +347,231 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 :root {
-  --blue: #4285f4; --red: #ea4335; --yellow: #fbbc05; --green: #34a853;
-  --btn-blue: #1a73e8; --text: #202124; --sub: #5f6368; --line: #dadce0;
-  --line2: #e8eaed; --hover: #f8f9fa; --ph: #f1f3f4;
+  --bg: #0a0906; --panel: #14110a; --panel2: #1d1810; --line: #3a2f14;
+  --amber: #ffb000; --amber2: #ffd75e; --dim: #8a6d1f; --text: #e8d9b0;
+  --muted: #9a8a5c; --green: #39ff88; --red: #ff5544;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #fff; color: var(--text);
-       font-family: Roboto, Arial, sans-serif; font-size: 14px;
-       background-image: radial-gradient(#eceef1 1.2px, transparent 1.2px);
-       background-size: 22px 22px; }
-header { position: sticky; top: 0; z-index: 10; background: #fff; }
-.bar { display: flex; align-items: center; gap: 24px; padding: 14px 24px 8px; }
-.logo { font-family: 'Press Start 2P', monospace; font-size: 14px; color: var(--text);
-        white-space: nowrap; cursor: pointer; user-select: none; padding-top: 4px; }
-.logo b { font-weight: 400; color: var(--btn-blue); }
-.stripe { height: 4px; background: repeating-linear-gradient(90deg,
-  #4285f4 0 20px, #ea4335 20px 40px, #fbbc05 40px 60px, #34a853 60px 80px); }
-.searchwrap { flex: 1; max-width: 560px; position: relative; }
-#search {
-  width: 100%; height: 46px; border: none; border-radius: 24px;
-  padding: 0 20px 0 52px; font: inherit; font-size: 15px; color: var(--text);
-  outline: none; background: #eaf1fb;
+html { scrollbar-color: var(--dim) var(--bg); }
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+body {
+  background: radial-gradient(ellipse at 50% 20%, #14110a 0%, #0a0906 60%, #060503 100%);
+  color: var(--text); font-family: VT323, monospace; font-size: 19px;
+  min-height: 100vh;
 }
-#search:focus { background: #fff; box-shadow: 0 1px 4px rgba(32,33,36,.28); }
-.searchwrap svg { position: absolute; left: 18px; top: 13px; width: 20px; height: 20px;
-                  fill: var(--sub); }
-#count { color: var(--sub); font-size: 13px; margin-left: auto; white-space: nowrap; }
-.tabs { display: flex; gap: 8px; padding: 0 24px; border-bottom: 1px solid var(--line2); }
-.tabs button {
-  background: none; border: none; font: inherit; font-size: 14px; color: var(--sub);
-  padding: 12px 14px 9px; cursor: pointer; border-bottom: 3px solid transparent;
+/* ---- animated CRT layers ---- */
+#gridfloor {
+  position: fixed; bottom: -6vh; left: -50%; width: 200%; height: 44vh;
+  pointer-events: none; z-index: 0; opacity: .5;
+  background:
+    repeating-linear-gradient(90deg, rgba(255,176,0,.16) 0 2px, transparent 2px 70px),
+    repeating-linear-gradient(0deg, rgba(255,176,0,.16) 0 2px, transparent 2px 46px);
+  transform: perspective(420px) rotateX(62deg);
+  animation: gridmove 1.5s linear infinite;
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
+  mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
 }
-.tabs button.on { color: var(--btn-blue); border-bottom-color: var(--btn-blue);
-                  font-weight: 500; }
+@keyframes gridmove { from { background-position-y: 0, 0; } to { background-position-y: 0, 46px; } }
+#crt { position: fixed; inset: 0; pointer-events: none; z-index: 95;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
+  animation: flicker 5s infinite; }
+#crt::before { content: ""; position: absolute; inset: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.5) 100%); }
+#crt::after { content: ""; position: absolute; left: 0; right: 0; height: 140px;
+  background: linear-gradient(to bottom, transparent, rgba(255,214,140,.05) 45%,
+              rgba(255,214,140,.08) 50%, rgba(255,214,140,.05) 55%, transparent);
+  animation: sweep 7s linear infinite; }
+@keyframes sweep { from { top: -20%; } to { top: 110%; } }
+@keyframes flicker {
+  0%, 100% { opacity: 1; } 3% { opacity: .82; } 4% { opacity: 1; }
+  31% { opacity: 1; } 32% { opacity: .87; } 33% { opacity: 1; }
+  67% { opacity: 1; } 68% { opacity: .9; } 69% { opacity: 1; }
+}
+/* ---- boot + loading overlays ---- */
+#boot { position: fixed; inset: 0; z-index: 200; background: #060503;
+  padding: 46px; transition: opacity .45s; }
+#boot pre { font-family: VT323, monospace; font-size: 22px; color: var(--amber);
+  text-shadow: 0 0 8px rgba(255,176,0,.6); line-height: 1.6; white-space: pre-wrap; }
+#loader { position: fixed; inset: 0; z-index: 150; display: none;
+  background: rgba(6,5,3,.93); text-align: center; }
+#loader .inner { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  width: min(480px, 86vw); }
+#loader .t1 { font-family: 'Press Start 2P', monospace; font-size: 18px;
+  color: var(--amber); text-shadow: 0 0 14px rgba(255,176,0,.7);
+  animation: pulse 1s steps(2) infinite; }
+#loader .t2 { font-size: 28px; color: var(--text); margin: 22px 0 26px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#loader .barwrap { height: 22px; border: 2px solid var(--amber); padding: 3px; }
+#loader .bar { height: 100%; width: 0; background: repeating-linear-gradient(90deg,
+  var(--amber) 0 14px, #7a5500 14px 18px); }
+#loader.go .bar { animation: fill 1.6s steps(24) forwards; }
+@keyframes fill { to { width: 100%; } }
+@keyframes pulse { 50% { opacity: .45; } }
+@keyframes blink { 50% { opacity: 0; } }
+/* ---- header ---- */
+header { position: sticky; top: 0; z-index: 10;
+  background: rgba(10,9,6,.94); backdrop-filter: blur(2px);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+.bar { display: flex; align-items: center; gap: 22px; padding: 14px 24px 10px; }
+.logo { font-family: 'Press Start 2P', monospace; font-size: 15px; color: var(--amber);
+  white-space: nowrap; cursor: pointer; user-select: none;
+  text-shadow: 0 0 12px rgba(255,176,0,.65); animation: glowpulse 3s ease-in-out infinite; }
+.logo b { font-weight: 400; color: var(--amber2); }
+.logo .cur { animation: blink 1.1s steps(1) infinite; }
+@keyframes glowpulse {
+  0%, 100% { text-shadow: 0 0 12px rgba(255,176,0,.65); }
+  50% { text-shadow: 0 0 20px rgba(255,176,0,.95); }
+}
+.searchwrap { flex: 1; max-width: 520px; position: relative; }
+.searchwrap::before { content: ">"; position: absolute; left: 14px; top: 6px;
+  color: var(--dim); font-size: 22px; }
+#search { width: 100%; height: 42px; background: rgba(0,0,0,.45);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 16px 0 34px;
+  font: inherit; font-size: 21px; color: var(--amber2); outline: none; caret-color: var(--amber); }
+#search::placeholder { color: var(--muted); }
+#search:focus { border-color: var(--amber);
+  box-shadow: 0 0 12px rgba(255,176,0,.35), inset 0 0 8px rgba(255,176,0,.08); }
+#count { color: var(--muted); font-size: 18px; margin-left: auto; white-space: nowrap; }
+.tabs { display: flex; gap: 6px; padding: 0 24px; }
+.tabs button { background: none; border: none; font-family: 'Press Start 2P', monospace;
+  font-size: 11px; color: var(--muted); padding: 10px 14px 12px; cursor: pointer;
+  border-bottom: 3px solid transparent; letter-spacing: 1px; }
+.tabs button.on { color: var(--amber); border-bottom-color: var(--amber);
+  text-shadow: 0 0 10px rgba(255,176,0,.7); }
 .tabs button:hover:not(.on) { color: var(--text); }
-.chips { display: flex; gap: 8px; padding: 14px 24px 4px; flex-wrap: wrap;
-         max-width: 1020px; margin: 0 auto; }
-.chip {
-  border: 1px solid var(--line); border-radius: 16px; padding: 6px 14px;
-  font-size: 13px; color: var(--text); cursor: pointer; background: #fff;
-  white-space: nowrap;
-}
-.chip:hover { background: var(--hover); }
-.chip.on { background: #e8f0fe; color: #1967d2; border-color: #e8f0fe; font-weight: 500; }
-.chip span { color: var(--sub); font-size: 12px; margin-left: 4px; }
-.chip.on span { color: #1967d2; }
+.chips { display: flex; gap: 8px; padding: 12px 24px 12px; flex-wrap: wrap;
+  max-width: 1020px; margin: 0 auto; }
+.chip { border: 1px solid var(--line); border-radius: 4px; padding: 4px 13px;
+  font-size: 18px; color: var(--text); cursor: pointer; background: rgba(0,0,0,.3);
+  white-space: nowrap; transition: box-shadow .12s, border-color .12s; }
+.chip:hover { border-color: var(--dim); }
+.chip.on { background: var(--amber); color: #0a0906; border-color: var(--amber);
+  box-shadow: 0 0 14px rgba(255,176,0,.5); }
+.chip span { color: var(--muted); font-size: 16px; margin-left: 5px; }
+.chip.on span { color: #4d3500; }
 .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
-       margin-right: 7px; }
-main { max-width: 1020px; margin: 0 auto; padding: 8px 24px 60px; }
-.row {
-  display: flex; align-items: center; gap: 18px; padding: 12px 14px;
-  border-radius: 14px; cursor: pointer; position: relative;
-  background: #fff; border: 1px solid var(--line2); margin-bottom: 10px;
-  transition: box-shadow .12s, transform .12s;
-}
-.row:hover { box-shadow: 0 2px 10px rgba(60,64,67,.18); transform: translateY(-1px); }
-.cover, .shot {
-  border-radius: 8px; background: var(--ph); flex-shrink: 0; overflow: hidden;
-  display: flex; align-items: center; justify-content: center; position: relative;
-}
-.cover::after, .shot::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.07) 0 1px, transparent 1px 3px);
-}
+  margin-right: 7px; box-shadow: 0 0 6px currentColor; }
+/* ---- game list ---- */
+main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
+  position: relative; z-index: 1; }
+.row { display: flex; align-items: center; gap: 18px; padding: 12px 14px;
+  border-radius: 6px; cursor: pointer; position: relative;
+  background: var(--panel); border: 1px solid var(--line); margin-bottom: 10px;
+  transition: box-shadow .15s, border-color .15s, transform .15s; }
+.row:hover { border-color: var(--amber);
+  box-shadow: 0 0 18px rgba(255,176,0,.28), inset 0 0 24px rgba(255,176,0,.05);
+  transform: translateX(5px); }
+.cover, .shot { border-radius: 4px; background: var(--panel2); flex-shrink: 0;
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+  position: relative; border: 1px solid rgba(255,176,0,.12); }
+.cover::after, .shot::after { content: ""; position: absolute; inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px); }
 .cover { width: 72px; height: 96px; }
 .shot { width: 170px; height: 96px; }
 .cover img, .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .cover .ph { font-family: 'Press Start 2P', monospace; font-size: 15px; color: #fff;
-             text-shadow: 1px 2px 0 rgba(0,0,0,.35); }
-.shot .ph2 { font-family: 'Press Start 2P', monospace; font-size: 7px; color: #bdc1c6; }
+  text-shadow: 1px 2px 0 rgba(0,0,0,.45); }
+.shot .ph2 { font-family: 'Press Start 2P', monospace; font-size: 7px; color: var(--muted); }
 .info { min-width: 0; flex: 1; }
-.info .nm { font-size: 16px; font-weight: 500; color: var(--text);
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.info .sub { font-size: 13px; color: var(--sub); margin-top: 5px; }
-.info .sub b { color: var(--sub); font-weight: 500; }
-.playbtn {
-  width: 44px; height: 44px; border-radius: 50%; background: var(--btn-blue);
-  color: #fff; display: flex; align-items: center; justify-content: center;
-  font-size: 16px; flex-shrink: 0; opacity: 0; transition: opacity .12s;
-  box-shadow: 0 1px 3px rgba(60,64,67,.3);
+.info .nm { font-size: 26px; color: var(--text); line-height: 1.1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color .12s, text-shadow .12s; }
+.row:hover .info .nm { color: var(--amber2); text-shadow: 0 0 10px rgba(255,176,0,.5); }
+.info .sub { font-size: 18px; color: var(--muted); margin-top: 3px; }
+.playbtn { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--amber);
+  color: var(--amber); background: rgba(0,0,0,.4); display: flex; align-items: center;
+  justify-content: center; font-size: 17px; flex-shrink: 0; opacity: 0;
+  transition: opacity .15s; padding-left: 4px; }
+.row:hover .playbtn { opacity: 1; animation: playpulse 1s ease-in-out infinite; }
+@keyframes playpulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(255,176,0,.5); }
+  50% { box-shadow: 0 0 20px rgba(255,176,0,.9); }
 }
-.row:hover .playbtn { opacity: 1; }
-.empty { text-align: center; padding: 90px 20px; color: var(--sub); line-height: 2;
-         background: #fff; border: 1px solid var(--line2); border-radius: 14px; }
-.empty .big { font-family: 'Press Start 2P', monospace; font-size: 15px;
-              color: var(--text); margin-bottom: 18px; }
-.empty code { background: var(--ph); border-radius: 4px; padding: 2px 8px;
-              font-size: 13px; }
-.card {
-  border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px;
-  margin: 14px 0; background: #fff;
-}
+.empty { text-align: center; padding: 80px 20px; color: var(--muted); line-height: 2;
+  background: rgba(0,0,0,.25); border: 1px dashed var(--line); border-radius: 6px;
+  font-size: 20px; }
+.empty .big { font-family: 'Press Start 2P', monospace; font-size: 16px;
+  color: var(--amber); margin-bottom: 20px; text-shadow: 0 0 12px rgba(255,176,0,.6);
+  animation: pulse 1.4s steps(2) infinite; }
+.empty code { background: var(--panel2); border-radius: 3px; padding: 2px 8px;
+  color: var(--amber2); font-family: inherit; }
+/* ---- cards (systems / settings) ---- */
+.card { border: 1px solid var(--line); border-radius: 6px; padding: 16px 20px;
+  margin: 14px 0; background: var(--panel); }
+.card:hover { border-color: var(--dim); }
 .card .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.card .head .nm { font-size: 16px; font-weight: 500; }
-.pill { border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 500; }
-.pill.ok { background: #e6f4ea; color: #137333; }
-.pill.bad { background: #fce8e6; color: #c5221f; }
-.dim { color: var(--sub); font-size: 13px; margin-top: 8px; line-height: 1.7;
-       word-break: break-all; }
-.dim b { color: var(--text); font-weight: 500; }
-.fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap;
-          align-items: center; }
-input.cfg {
-  border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px;
-  font: inherit; font-size: 13px; color: var(--text); flex: 1; min-width: 220px;
-  outline: none;
-}
-input.cfg:focus { border-color: var(--btn-blue); box-shadow: 0 0 0 1px var(--btn-blue); }
-button.txt {
-  background: none; border: none; color: var(--btn-blue); font: inherit;
-  font-size: 14px; font-weight: 500; padding: 8px 14px; border-radius: 6px;
-  cursor: pointer;
-}
-button.txt:hover { background: #e8f0fe; }
-button.filled {
-  background: var(--btn-blue); border: none; color: #fff; font: inherit;
-  font-size: 14px; font-weight: 500; padding: 9px 22px; border-radius: 6px;
-  cursor: pointer;
-}
-button.filled:hover { background: #1765cc; box-shadow: 0 1px 3px rgba(60,64,67,.3); }
-button.outlined {
-  background: #fff; border: 1px solid var(--line); color: var(--btn-blue);
-  font: inherit; font-size: 14px; font-weight: 500; padding: 8px 22px;
-  border-radius: 6px; cursor: pointer;
-}
-button.outlined:hover { background: #f6f9fe; }
-#snack {
-  position: fixed; bottom: 24px; left: 24px; background: #323232; color: #fff;
-  border-radius: 6px; padding: 13px 24px; font-size: 14px; display: none;
-  z-index: 100; box-shadow: 0 3px 10px rgba(0,0,0,.3); max-width: 70vw;
-}
-.howto { color: var(--sub); font-size: 13px; line-height: 1.9; }
-.howto code { background: var(--ph); border-radius: 4px; padding: 1px 7px;
-              font-size: 12px; color: var(--text); }
-.howto h3 { color: var(--text); font-size: 14px; font-weight: 500; margin: 16px 0 4px; }
+.card .head .nm { font-size: 24px; color: var(--amber2); }
+.pill { border-radius: 3px; padding: 2px 12px; font-size: 17px; border: 1px solid; }
+.pill.ok { border-color: var(--green); color: var(--green);
+  text-shadow: 0 0 8px rgba(57,255,136,.5); }
+.pill.bad { border-color: var(--red); color: var(--red);
+  text-shadow: 0 0 8px rgba(255,85,68,.5); animation: pulse 1.6s steps(2) infinite; }
+.dim { color: var(--muted); font-size: 18px; margin-top: 8px; line-height: 1.5;
+  word-break: break-all; }
+.dim b { color: var(--text); font-weight: 400; }
+.fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+input.cfg { background: rgba(0,0,0,.45); border: 1px solid var(--line); border-radius: 4px;
+  padding: 7px 12px; font: inherit; font-size: 18px; color: var(--amber2);
+  flex: 1; min-width: 220px; outline: none; caret-color: var(--amber); }
+input.cfg::placeholder { color: var(--muted); }
+input.cfg:focus { border-color: var(--amber); box-shadow: 0 0 10px rgba(255,176,0,.3); }
+button.txt { background: none; border: 1px solid transparent; color: var(--amber);
+  font: inherit; font-size: 19px; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+button.txt:hover { border-color: var(--amber); box-shadow: 0 0 10px rgba(255,176,0,.35); }
+button.filled { background: var(--amber); border: none; color: #0a0906; font: inherit;
+  font-size: 19px; padding: 7px 22px; border-radius: 4px; cursor: pointer; }
+button.filled:hover { background: var(--amber2); box-shadow: 0 0 16px rgba(255,176,0,.6); }
+button.outlined { background: rgba(0,0,0,.3); border: 1px solid var(--amber);
+  color: var(--amber); font: inherit; font-size: 19px; padding: 6px 22px;
+  border-radius: 4px; cursor: pointer; }
+button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
+#snack { position: fixed; bottom: 22px; left: 22px; background: rgba(6,5,3,.95);
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 4px;
+  padding: 10px 22px; font-size: 20px; display: none; z-index: 160;
+  box-shadow: 0 0 18px rgba(255,176,0,.35); max-width: 70vw;
+  text-shadow: 0 0 8px rgba(255,176,0,.5); }
+.howto { color: var(--muted); font-size: 19px; line-height: 1.8; }
+.howto code { background: rgba(0,0,0,.4); border-radius: 3px; padding: 1px 7px;
+  font-size: 18px; color: var(--amber2); font-family: inherit; }
+.howto h3 { color: var(--amber); font-size: 20px; font-weight: 400; margin: 14px 0 4px;
+  text-shadow: 0 0 8px rgba(255,176,0,.4); }
 @media (max-width: 700px) { .shot { display: none; } #count { display: none; } }
 </style>
 </head>
 <body>
+<div id="gridfloor"></div>
 <header>
   <div class="bar">
-    <div class="logo" onclick="setTab('games')">RETRO<b>SHELF</b></div>
+    <div class="logo" onclick="setTab('games')">RETRO<b>SHELF</b><span class="cur">▮</span></div>
     <div class="searchwrap">
-      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-      <input id="search" placeholder="Search your games" oninput="render()" autocomplete="off">
+      <input id="search" placeholder="search games..." oninput="render()" autocomplete="off">
     </div>
     <span id="count"></span>
   </div>
   <div class="tabs">
-    <button id="tab-games" class="on" onclick="setTab('games')">Games</button>
-    <button id="tab-systems" onclick="setTab('systems')">Systems</button>
-    <button id="tab-settings" onclick="setTab('settings')">Settings</button>
+    <button id="tab-games" class="on" onclick="setTab('games')">GAMES</button>
+    <button id="tab-systems" onclick="setTab('systems')">SYSTEMS</button>
+    <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
   </div>
   <div class="chips" id="chips"></div>
-  <div class="stripe"></div>
 </header>
 <main id="content"></main>
 <div id="snack"></div>
+<div id="loader"><div class="inner">
+  <div class="t1">NOW LOADING</div>
+  <div class="t2" id="loadname"></div>
+  <div class="barwrap"><div class="bar"></div></div>
+</div></div>
+<div id="crt"></div>
+<div id="boot"><pre id="boottext"></pre></div>
 <script>
 let state = null;
 let tab = 'games';
@@ -518,7 +583,25 @@ const SYSCOLORS = {
   genesis: '#0060a8', dreamcast: '#f0762f', ps1: '#4f5bd5', ps2: '#2a3b8f',
   psp: '#4a4f57', arcade: '#d81b60', atari2600: '#b7410e'
 };
-function sysColor(id) { return SYSCOLORS[id] || '#5f6368'; }
+function sysColor(id) { return SYSCOLORS[id] || '#9a8a5c'; }
+
+/* boot sequence */
+const BOOT = 'RETROSHELF BIOS v3.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING ROM LIBRARY ...\n\nREADY.';
+(function boot() {
+  const el = document.getElementById('boottext');
+  const box = document.getElementById('boot');
+  let i = 0;
+  const t = setInterval(() => {
+    i += 3;
+    el.textContent = BOOT.slice(0, i) + '▮';
+    if (i >= BOOT.length) {
+      clearInterval(t);
+      el.textContent = BOOT;
+      setTimeout(() => { box.style.opacity = '0'; }, 260);
+      setTimeout(() => box.remove(), 750);
+    }
+  }, 16);
+})();
 
 async function refresh() {
   state = await (await fetch('/api/state')).json();
@@ -538,19 +621,34 @@ function esc(s) {
 
 function snack(msg) {
   const t = document.getElementById('snack');
-  t.textContent = msg;
+  t.textContent = '> ' + msg;
   t.style.display = 'block';
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.style.display = 'none', 3000);
+  t._h = setTimeout(() => t.style.display = 'none', 3200);
 }
 
+function showLoader(name) {
+  const l = document.getElementById('loader');
+  document.getElementById('loadname').textContent = name;
+  l.classList.remove('go');
+  void l.offsetWidth;
+  l.style.display = 'block';
+  l.classList.add('go');
+}
+function hideLoader() { document.getElementById('loader').style.display = 'none'; }
+
 async function launch(sysId, rom, name) {
-  snack('Launching ' + name + '...');
+  showLoader(name);
   const r = await (await fetch('/api/launch', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({system: sysId, rom: rom})})).json();
-  if (!r.ok) snack('Could not launch: ' + r.msg);
-  else setTimeout(refresh, 800);
+  if (!r.ok) {
+    hideLoader();
+    snack('ERROR: ' + r.msg);
+  } else {
+    setTimeout(hideLoader, 1750);
+    setTimeout(refresh, 900);
+  }
 }
 
 function allGames() {
@@ -580,9 +678,9 @@ function render() {
   if (tab === 'games') {
     const withGames = state.systems.filter(s => s.games.length);
     chips.innerHTML =
-      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';render()">All<span>${allGames().length}</span></div>` +
+      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';render()">ALL<span>${allGames().length}</span></div>` +
       withGames.map(s =>
-        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()"><span class="dot" style="background:${sysColor(s.id)}"></span>${esc(s.name)}<span>${s.games.length}</span></div>`
+        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()"><span class="dot" style="background:${sysColor(s.id)};color:${sysColor(s.id)}"></span>${esc(s.name)}<span>${s.games.length}</span></div>`
       ).join('');
 
     let games = sel === 'all' ? allGames()
@@ -597,7 +695,7 @@ function render() {
       content.innerHTML = `<div class="empty">
         <div class="big">INSERT CARTRIDGE</div>
         Drop your rom files into <code>${esc(state.library_root)}\\roms\\&lt;system&gt;\\</code><br>
-        then refresh this page. The <b>Systems</b> tab lists every folder name.</div>`;
+        then refresh this page. The <b>SYSTEMS</b> tab lists every folder name.</div>`;
       return;
     }
     content.innerHTML = games.map(g => {
@@ -605,7 +703,7 @@ function render() {
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
         : `<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
       const coverBg = g.art ? '' :
-        ` style="background:linear-gradient(150deg, ${sysColor(g.sysId)}, #23252b)"`;
+        ` style="background:linear-gradient(150deg, ${sysColor(g.sysId)}, #17130b)"`;
       const shot = g.shot
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&kind=screen&rom=${encodeURIComponent(g.file)}">`
         : `<span class="ph2">NO SCREENSHOT</span>`;
@@ -624,22 +722,22 @@ function render() {
       state.systems.length + ' emulators ready';
     content.innerHTML = state.systems.map(s => {
       const status = s.emu_found
-        ? `<span class="pill ok">Ready</span>`
-        : `<span class="pill bad">Emulator missing</span>`;
+        ? `<span class="pill ok">READY</span>`
+        : `<span class="pill bad">EMULATOR MISSING</span>`;
       const detail = s.emu_found
         ? `Using <b>${esc(s.emu_path)}</b>`
         : `Download <b>${esc(s.emu_name)}</b> from <b>${esc(s.emu_site)}</b> and unzip it into
            <b>${esc(s.emu_dir)}\\</b> &mdash; the exe is picked up automatically.`;
       return `<div class="card">
-        <div class="head"><span class="dot" style="background:${sysColor(s.id)}"></span><span class="nm">${esc(s.name)}</span>${status}</div>
+        <div class="head"><span class="dot" style="background:${sysColor(s.id)};color:${sysColor(s.id)}"></span><span class="nm">${esc(s.name)}</span>${status}</div>
         <div class="dim">${detail}<br>
           Games go in <b>${esc(s.roms_dir)}\\</b> (${esc(s.exts.join(' '))})</div>
         <div class="fields">
-          <input class="cfg" id="ep-${s.id}" placeholder="Custom emulator exe path (optional)"
+          <input class="cfg" id="ep-${s.id}" placeholder="custom emulator exe path (optional)"
              value="${esc(s.emu_override)}">
           <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}"
              title="Placeholders: {emu} {rom} {romname} {romdir}">
-          <button class="txt" onclick="saveSystem('${s.id}')">Save</button>
+          <button class="txt" onclick="saveSystem('${s.id}')">SAVE</button>
         </div></div>`;
     }).join('');
 
@@ -649,22 +747,22 @@ function render() {
         <div class="head"><span class="nm">Library folder</span></div>
         <div class="fields">
           <input class="cfg" id="root" value="${esc(state.library_root)}">
-          <button class="filled" onclick="saveSettings()">Save &amp; rescan</button>
-          <button class="outlined" onclick="mkdirs()">Create folder layout</button>
+          <button class="filled" onclick="saveSettings()">SAVE &amp; RESCAN</button>
+          <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
         </div></div>
       <div class="card howto">
-        <h3>How it works</h3>
+        <h3>HOW IT WORKS</h3>
         RetroShelf scans one library folder. Inside it:<br>
-        <code>roms\&lt;system&gt;\</code> &mdash; your game files (subfolders are fine)<br>
-        <code>emulators\&lt;system&gt;\</code> &mdash; the emulator, unzipped; the exe is found automatically<br>
-        <code>art\&lt;system&gt;\</code> &mdash; cover images named exactly like the rom file<br>
-        <code>art\&lt;system&gt;\screens\</code> &mdash; gameplay screenshots, same naming
-        <h3>Art shortcuts</h3>
+        <code>roms\\&lt;system&gt;\\</code> &mdash; your game files (subfolders are fine)<br>
+        <code>emulators\\&lt;system&gt;\\</code> &mdash; the emulator, unzipped; the exe is found automatically<br>
+        <code>art\\&lt;system&gt;\\</code> &mdash; cover images named exactly like the rom file<br>
+        <code>art\\&lt;system&gt;\\screens\\</code> &mdash; gameplay screenshots, same naming
+        <h3>ART SHORTCUTS</h3>
         A cover can also sit right next to the rom (same name, .png/.jpg), or in an
-        <code>art\</code> / <code>covers\</code> subfolder beside it. Screenshots can sit in a
-        <code>screens\</code> or <code>screenshots\</code> subfolder next to the roms.
-        <h3>Launching</h3>
-        Click a game and it opens in the matching emulator. The Systems tab lets you
+        <code>art\\</code> / <code>covers\\</code> subfolder beside it. Screenshots can sit in a
+        <code>screens\\</code> or <code>screenshots\\</code> subfolder next to the roms.
+        <h3>LAUNCHING</h3>
+        Click a game and it opens in the matching emulator. The SYSTEMS tab lets you
         point at a custom exe or tweak launch arguments per system.
       </div>`;
   }
@@ -675,21 +773,21 @@ async function saveSystem(id) {
     body: JSON.stringify({id: id,
       emu_path: document.getElementById('ep-' + id).value,
       args: document.getElementById('ar-' + id).value})});
-  snack('Saved');
+  snack('SAVED');
   refresh();
 }
 
 async function saveSettings() {
   await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({library_root: document.getElementById('root').value})});
-  snack('Saved');
+  snack('SAVED');
   refresh();
 }
 
 async function mkdirs() {
   const r = await (await fetch('/api/mkdirs', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: '{}'})).json();
-  snack(r.ok ? 'Folders created' : r.msg);
+  snack(r.ok ? 'FOLDERS CREATED' : r.msg);
   refresh();
 }
 
