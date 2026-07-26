@@ -132,17 +132,20 @@ def find_emulator(sysdef, cfg):
     return None
 
 
-def find_art(sysdef, rom_path, cfg):
+def find_art(sysdef, rom_path, cfg, kind="cover"):
     stem = rom_path.stem
-    candidates = []
-    for ext in ART_EXTS:
-        candidates.append(rom_path.parent / (stem + ext))
-        candidates.append(rom_path.parent / "art" / (stem + ext))
-        candidates.append(rom_path.parent / "covers" / (stem + ext))
-        candidates.append(Path(cfg["library_root"]) / "art" / sysdef["id"] / (stem + ext))
-    for c in candidates:
-        if c.is_file():
-            return c
+    root = Path(cfg["library_root"])
+    if kind == "screen":
+        dirs = [rom_path.parent / "screens", rom_path.parent / "screenshots",
+                root / "art" / sysdef["id"] / "screens"]
+    else:
+        dirs = [rom_path.parent, rom_path.parent / "art", rom_path.parent / "covers",
+                root / "art" / sysdef["id"]]
+    for d in dirs:
+        for ext in ART_EXTS:
+            c = d / (stem + ext)
+            if c.is_file():
+                return c
     return None
 
 
@@ -157,7 +160,7 @@ def scan_games(sysdef, cfg):
     for p in files:
         if not p.is_file() or p.suffix.lower() not in exts:
             continue
-        if p.parent.name.lower() in ("art", "covers"):
+        if p.parent.name.lower() in ("art", "covers", "screens", "screenshots"):
             continue
         # hide raw discs that already have a cue/gdi/m3u pointing at them
         if p.suffix.lower() in (".bin", ".img", ".iso") and p.stem.lower() in stems_with_cue:
@@ -167,6 +170,7 @@ def scan_games(sysdef, cfg):
             "name": p.stem,
             "file": str(p),
             "art": find_art(sysdef, p, cfg) is not None,
+            "shot": find_art(sysdef, p, cfg, "screen") is not None,
             "plays": stat.get("plays", 0),
             "last": stat.get("last", 0),
         })
@@ -234,6 +238,8 @@ def create_layout(cfg):
     for sub in ("roms", "emulators", "art"):
         for sysdef in SYSTEMS:
             (root / sub / sysdef["id"]).mkdir(parents=True, exist_ok=True)
+    for sysdef in SYSTEMS:
+        (root / "art" / sysdef["id"] / "screens").mkdir(parents=True, exist_ok=True)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -268,9 +274,10 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             system_id = qs.get("system", [""])[0]
             rom = qs.get("rom", [""])[0]
+            kind = "screen" if qs.get("kind", [""])[0] == "screen" else "cover"
             sysdef = SYSTEMS_BY_ID.get(system_id)
             cfg = load_config()
-            art = find_art(sysdef, Path(rom), cfg) if sysdef and rom else None
+            art = find_art(sysdef, Path(rom), cfg, kind) if sysdef and rom else None
             if not art:
                 self.send_response(404)
                 self.end_headers()
@@ -336,140 +343,163 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>RETROSHELF</title>
+<title>RetroShelf</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #0b0b0d; --panel: #131316; --panel2: #1a1a1f; --line: #2a2a30;
-  --amber: #ffb000; --amber-dim: #b87e00; --text: #d8d2c4; --muted: #6f6a5e;
-  --green: #3fd97a; --red: #ff4d4d;
+  --blue: #4285f4; --red: #ea4335; --yellow: #fbbc05; --green: #34a853;
+  --btn-blue: #1a73e8; --text: #202124; --sub: #5f6368; --line: #dadce0;
+  --line2: #e8eaed; --hover: #f8f9fa; --ph: #f1f3f4;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  background: var(--bg); color: var(--text);
-  font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px;
-  min-height: 100vh;
-}
-body::after {
-  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 99;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.14) 0 1px, transparent 1px 3px);
-}
-header {
-  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 10;
-}
-h1 { font-size: 20px; letter-spacing: 4px; color: var(--amber);
-     text-shadow: 0 0 12px rgba(255,176,0,.45); }
-h1 .blink { animation: blink 1.2s steps(1) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
-nav { display: flex; gap: 4px; }
-nav button {
-  background: none; border: 1px solid var(--line); color: var(--muted);
-  font: inherit; padding: 6px 14px; cursor: pointer; letter-spacing: 2px;
-}
-nav button.on { color: var(--bg); background: var(--amber); border-color: var(--amber); font-weight: bold; }
-nav button:hover:not(.on) { color: var(--amber); border-color: var(--amber-dim); }
+body { background: #fff; color: var(--text);
+       font-family: Roboto, Arial, sans-serif; font-size: 14px; }
+header { position: sticky; top: 0; z-index: 10; background: #fff; }
+.bar { display: flex; align-items: center; gap: 24px; padding: 14px 24px 8px; }
+.logo { font-size: 24px; font-weight: 500; letter-spacing: -.5px; white-space: nowrap;
+        cursor: pointer; user-select: none; }
+.searchwrap { flex: 1; max-width: 640px; position: relative; }
 #search {
-  background: var(--bg); border: 1px solid var(--line); color: var(--text);
-  font: inherit; padding: 6px 10px; width: 220px;
+  width: 100%; height: 44px; border: 1px solid var(--line); border-radius: 22px;
+  padding: 0 20px 0 48px; font: inherit; font-size: 16px; color: var(--text);
+  outline: none; background: #fff;
 }
-#search:focus { outline: none; border-color: var(--amber-dim); }
-#count { color: var(--muted); margin-left: auto; letter-spacing: 1px; }
-main { display: flex; min-height: calc(100vh - 54px); }
-aside {
-  width: 220px; flex-shrink: 0; border-right: 1px solid var(--line);
-  background: var(--panel); padding: 10px 0;
+#search:hover, #search:focus { box-shadow: 0 1px 6px rgba(32,33,36,.24); border-color: transparent; }
+.searchwrap svg { position: absolute; left: 16px; top: 12px; width: 20px; height: 20px;
+                  fill: #9aa0a6; }
+#count { color: var(--sub); font-size: 13px; margin-left: auto; white-space: nowrap; }
+.tabs { display: flex; gap: 8px; padding: 0 24px; border-bottom: 1px solid var(--line2); }
+.tabs button {
+  background: none; border: none; font: inherit; font-size: 14px; color: var(--sub);
+  padding: 12px 14px 9px; cursor: pointer; border-bottom: 3px solid transparent;
 }
-aside div {
-  padding: 7px 18px; cursor: pointer; color: var(--muted);
-  display: flex; justify-content: space-between; letter-spacing: 1px;
+.tabs button.on { color: var(--btn-blue); border-bottom-color: var(--btn-blue);
+                  font-weight: 500; }
+.tabs button:hover:not(.on) { color: var(--text); }
+.chips { display: flex; gap: 8px; padding: 14px 24px 4px; flex-wrap: wrap;
+         max-width: 1020px; margin: 0 auto; }
+.chip {
+  border: 1px solid var(--line); border-radius: 16px; padding: 6px 14px;
+  font-size: 13px; color: var(--text); cursor: pointer; background: #fff;
+  white-space: nowrap;
 }
-aside div:hover { color: var(--text); }
-aside div.on { color: var(--amber); background: var(--panel2);
-               border-left: 3px solid var(--amber); padding-left: 15px; }
-aside div span { color: var(--muted); font-size: 12px; }
-#content { flex: 1; padding: 18px; }
-#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+.chip:hover { background: var(--hover); }
+.chip.on { background: #e8f0fe; color: #1967d2; border-color: #e8f0fe; font-weight: 500; }
+.chip span { color: var(--sub); font-size: 12px; margin-left: 4px; }
+.chip.on span { color: #1967d2; }
+main { max-width: 1020px; margin: 0 auto; padding: 8px 24px 60px; }
+.row {
+  display: flex; align-items: center; gap: 18px; padding: 12px 14px;
+  border-radius: 12px; cursor: pointer; position: relative;
+}
+.row:hover { background: var(--hover); }
+.row + .row { margin-top: 2px; }
+.cover, .shot {
+  border-radius: 8px; background: var(--ph); flex-shrink: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.cover { width: 72px; height: 96px; }
+.shot { width: 170px; height: 96px; }
+.cover img, .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cover .ph { font-size: 24px; font-weight: 500; color: #bdc1c6; }
+.shot .ph2 { font-size: 11px; color: #bdc1c6; }
+.info { min-width: 0; flex: 1; }
+.info .nm { font-size: 16px; font-weight: 500; color: var(--text);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.info .sub { font-size: 13px; color: var(--sub); margin-top: 5px; }
+.info .sub b { color: var(--sub); font-weight: 500; }
+.playbtn {
+  width: 44px; height: 44px; border-radius: 50%; background: var(--btn-blue);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; flex-shrink: 0; opacity: 0; transition: opacity .12s;
+  box-shadow: 0 1px 3px rgba(60,64,67,.3);
+}
+.row:hover .playbtn { opacity: 1; }
+.empty { text-align: center; padding: 90px 20px; color: var(--sub); line-height: 2; }
+.empty .big { font-size: 20px; color: var(--text); margin-bottom: 8px; }
+.empty code { background: var(--ph); border-radius: 4px; padding: 2px 8px;
+              font-size: 13px; }
 .card {
-  background: var(--panel); border: 1px solid var(--line); cursor: pointer;
-  display: flex; flex-direction: column; transition: border-color .1s, transform .1s;
+  border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px;
+  margin: 14px 0; background: #fff;
 }
-.card:hover { border-color: var(--amber); transform: translateY(-2px); }
-.card .box {
-  aspect-ratio: 3/4; display: flex; align-items: center; justify-content: center;
-  background: var(--panel2); overflow: hidden; position: relative;
-}
-.card .box img { width: 100%; height: 100%; object-fit: cover; }
-.card .box .ph {
-  font-size: 30px; color: var(--amber-dim); letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(255,176,0,.3);
-}
-.card .box .play {
-  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  background: rgba(11,11,13,.75); opacity: 0; transition: opacity .1s;
-  color: var(--amber); font-size: 34px;
-}
-.card:hover .box .play { opacity: 1; }
-.card .meta { padding: 8px 10px; }
-.card .meta .nm { color: var(--text); font-size: 13px; word-break: break-word; }
-.card .meta .sub { color: var(--muted); font-size: 11px; margin-top: 4px; letter-spacing: 1px; }
-.empty {
-  border: 1px dashed var(--line); padding: 40px; text-align: center;
-  color: var(--muted); line-height: 2; letter-spacing: 1px;
-}
-.empty b { color: var(--amber); }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line);
-         vertical-align: top; }
-th { color: var(--amber); letter-spacing: 2px; font-size: 12px; }
-td { font-size: 13px; }
-.ok { color: var(--green); }
-.bad { color: var(--red); }
-.dim { color: var(--muted); font-size: 12px; }
+.card .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.card .head .nm { font-size: 16px; font-weight: 500; }
+.pill { border-radius: 12px; padding: 4px 12px; font-size: 12px; font-weight: 500; }
+.pill.ok { background: #e6f4ea; color: #137333; }
+.pill.bad { background: #fce8e6; color: #c5221f; }
+.dim { color: var(--sub); font-size: 13px; margin-top: 8px; line-height: 1.7;
+       word-break: break-all; }
+.dim b { color: var(--text); font-weight: 500; }
+.fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap;
+          align-items: center; }
 input.cfg {
-  background: var(--bg); border: 1px solid var(--line); color: var(--text);
-  font: inherit; font-size: 12px; padding: 5px 8px; width: 100%; margin-top: 4px;
+  border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px;
+  font: inherit; font-size: 13px; color: var(--text); flex: 1; min-width: 220px;
+  outline: none;
 }
-input.cfg:focus { outline: none; border-color: var(--amber-dim); }
-button.act {
-  background: none; border: 1px solid var(--amber-dim); color: var(--amber);
-  font: inherit; font-size: 12px; padding: 5px 14px; cursor: pointer;
-  letter-spacing: 1px; margin-top: 6px;
+input.cfg:focus { border-color: var(--btn-blue); box-shadow: 0 0 0 1px var(--btn-blue); }
+button.txt {
+  background: none; border: none; color: var(--btn-blue); font: inherit;
+  font-size: 14px; font-weight: 500; padding: 8px 14px; border-radius: 6px;
+  cursor: pointer;
 }
-button.act:hover { background: var(--amber); color: var(--bg); }
-#toast {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: var(--panel); border: 1px solid var(--amber); color: var(--amber);
-  padding: 10px 24px; letter-spacing: 2px; display: none; z-index: 100;
-  box-shadow: 0 0 20px rgba(255,176,0,.25);
+button.txt:hover { background: #e8f0fe; }
+button.filled {
+  background: var(--btn-blue); border: none; color: #fff; font: inherit;
+  font-size: 14px; font-weight: 500; padding: 9px 22px; border-radius: 6px;
+  cursor: pointer;
 }
-.settings-box { max-width: 640px; }
-.settings-box h2 { color: var(--amber); letter-spacing: 2px; font-size: 14px;
-                   margin: 18px 0 8px; }
-.settings-box p { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 6px 0; }
-.settings-box code { color: var(--text); }
+button.filled:hover { background: #1765cc; box-shadow: 0 1px 3px rgba(60,64,67,.3); }
+button.outlined {
+  background: #fff; border: 1px solid var(--line); color: var(--btn-blue);
+  font: inherit; font-size: 14px; font-weight: 500; padding: 8px 22px;
+  border-radius: 6px; cursor: pointer;
+}
+button.outlined:hover { background: #f6f9fe; }
+#snack {
+  position: fixed; bottom: 24px; left: 24px; background: #323232; color: #fff;
+  border-radius: 6px; padding: 13px 24px; font-size: 14px; display: none;
+  z-index: 100; box-shadow: 0 3px 10px rgba(0,0,0,.3); max-width: 70vw;
+}
+.howto { color: var(--sub); font-size: 13px; line-height: 1.9; }
+.howto code { background: var(--ph); border-radius: 4px; padding: 1px 7px;
+              font-size: 12px; color: var(--text); }
+.howto h3 { color: var(--text); font-size: 14px; font-weight: 500; margin: 16px 0 4px; }
+@media (max-width: 700px) { .shot { display: none; } #count { display: none; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>RETROSHELF<span class="blink">_</span></h1>
-  <nav>
-    <button id="tab-library" class="on" onclick="setTab('library')">LIBRARY</button>
-    <button id="tab-systems" onclick="setTab('systems')">SYSTEMS</button>
-    <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
-  </nav>
-  <input id="search" placeholder="search..." oninput="render()">
-  <span id="count"></span>
+  <div class="bar">
+    <div class="logo" onclick="setTab('games')">
+      <span style="color:#4285f4">R</span><span style="color:#ea4335">e</span><span
+       style="color:#fbbc05">t</span><span style="color:#4285f4">r</span><span
+       style="color:#34a853">o</span><span style="color:#ea4335">S</span><span
+       style="color:#4285f4">h</span><span style="color:#fbbc05">e</span><span
+       style="color:#34a853">l</span><span style="color:#ea4335">f</span>
+    </div>
+    <div class="searchwrap">
+      <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input id="search" placeholder="Search your games" oninput="render()" autocomplete="off">
+    </div>
+    <span id="count"></span>
+  </div>
+  <div class="tabs">
+    <button id="tab-games" class="on" onclick="setTab('games')">Games</button>
+    <button id="tab-systems" onclick="setTab('systems')">Systems</button>
+    <button id="tab-settings" onclick="setTab('settings')">Settings</button>
+  </div>
+  <div class="chips" id="chips"></div>
 </header>
-<main>
-  <aside id="sidebar"></aside>
-  <div id="content"></div>
-</main>
-<div id="toast"></div>
+<main id="content"></main>
+<div id="snack"></div>
 <script>
 let state = null;
-let tab = 'library';
+let tab = 'games';
 let sel = 'all';
 
 async function refresh() {
@@ -479,7 +509,7 @@ async function refresh() {
 
 function setTab(t) {
   tab = t;
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('on'));
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('on'));
   document.getElementById('tab-' + t).classList.add('on');
   render();
 }
@@ -488,22 +518,20 @@ function esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function toast(msg, bad) {
-  const t = document.getElementById('toast');
+function snack(msg) {
+  const t = document.getElementById('snack');
   t.textContent = msg;
-  t.style.borderColor = bad ? 'var(--red)' : 'var(--amber)';
-  t.style.color = bad ? 'var(--red)' : 'var(--amber)';
   t.style.display = 'block';
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.style.display = 'none', 2600);
+  t._h = setTimeout(() => t.style.display = 'none', 3000);
 }
 
 async function launch(sysId, rom, name) {
-  toast('▶ LAUNCHING ' + name.toUpperCase());
+  snack('Launching ' + name + '...');
   const r = await (await fetch('/api/launch', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({system: sysId, rom: rom})})).json();
-  if (!r.ok) toast('▲ ' + r.msg.toUpperCase(), true);
+  if (!r.ok) snack('Could not launch: ' + r.msg);
   else setTimeout(refresh, 800);
 }
 
@@ -514,84 +542,111 @@ function allGames() {
   return out;
 }
 
+function ago(ts) {
+  if (!ts) return '';
+  const d = Math.floor(Date.now()/1000 - ts);
+  if (d < 3600) return 'played just now';
+  if (d < 86400) return 'played ' + Math.floor(d/3600) + 'h ago';
+  if (d < 86400*30) return 'played ' + Math.floor(d/86400) + 'd ago';
+  return 'played ' + new Date(ts*1000).toLocaleDateString();
+}
+
 function render() {
   if (!state) return;
-  const side = document.getElementById('sidebar');
   const content = document.getElementById('content');
+  const chips = document.getElementById('chips');
   const search = document.getElementById('search');
-  search.style.display = tab === 'library' ? '' : 'none';
-  side.style.display = tab === 'library' ? '' : 'none';
+  const count = document.getElementById('count');
+  chips.style.display = tab === 'games' ? '' : 'none';
 
-  if (tab === 'library') {
+  if (tab === 'games') {
     const withGames = state.systems.filter(s => s.games.length);
-    let html = `<div class="${sel==='all'?'on':''}" onclick="sel='all';render()">ALL GAMES <span>${allGames().length}</span></div>`;
-    for (const s of withGames)
-      html += `<div class="${sel===s.id?'on':''}" onclick="sel='${s.id}';render()">${esc(s.name.toUpperCase())} <span>${s.games.length}</span></div>`;
-    side.innerHTML = html;
+    chips.innerHTML =
+      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';render()">All<span>${allGames().length}</span></div>` +
+      withGames.map(s =>
+        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()">${esc(s.name)}<span>${s.games.length}</span></div>`
+      ).join('');
 
     let games = sel === 'all' ? allGames()
       : (state.systems.find(s => s.id === sel) || {games:[]}).games
-          .map(g => ({...g, sysId: sel, sysName: ''}));
+          .map(g => ({...g, sysId: sel,
+                      sysName: (state.systems.find(s => s.id === sel) || {}).name || ''}));
     const q = search.value.trim().toLowerCase();
     if (q) games = games.filter(g => g.name.toLowerCase().includes(q));
-    document.getElementById('count').textContent = games.length + ' GAMES';
+    count.textContent = games.length + (games.length === 1 ? ' game' : ' games');
 
     if (!games.length) {
-      content.innerHTML = `<div class="empty">NO GAMES FOUND<br>
-        drop rom files into <b>${esc(state.library_root)}\\roms\\&lt;system&gt;\\</b><br>
-        then refresh this page &mdash; see the <b>SYSTEMS</b> tab for folder names</div>`;
+      content.innerHTML = `<div class="empty">
+        <div class="big">No games yet</div>
+        Drop your rom files into <code>${esc(state.library_root)}\\roms\\&lt;system&gt;\\</code><br>
+        then refresh this page. The <b>Systems</b> tab lists every folder name.</div>`;
       return;
     }
-    content.innerHTML = '<div id="grid">' + games.map(g => {
-      const art = g.art
+    content.innerHTML = games.map(g => {
+      const cover = g.art
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
         : `<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
-      const sub = [g.sysName ? esc(g.sysName.toUpperCase()) : null,
-                   g.plays ? '▶ ' + g.plays : null].filter(Boolean).join(' &nbsp;·&nbsp; ');
-      return `<div class="card" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
-        <div class="box">${art}<div class="play">▶</div></div>
-        <div class="meta"><div class="nm">${esc(g.name)}</div>
-        ${sub ? '<div class="sub">' + sub + '</div>' : ''}</div></div>`;
-    }).join('') + '</div>';
-    document.getElementById('count').textContent = games.length + ' GAMES';
+      const shot = g.shot
+        ? `<img loading="lazy" src="/api/art?system=${g.sysId}&kind=screen&rom=${encodeURIComponent(g.file)}">`
+        : `<span class="ph2">no screenshot</span>`;
+      const sub = [g.sysName, g.plays ? g.plays + (g.plays === 1 ? ' play' : ' plays') : null,
+                   ago(g.last) || null].filter(Boolean).join(' · ');
+      return `<div class="row" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
+        <div class="cover">${cover}</div>
+        <div class="shot">${shot}</div>
+        <div class="info"><div class="nm">${esc(g.name)}</div>
+          <div class="sub">${esc(sub)}</div></div>
+        <div class="playbtn">▶</div></div>`;
+    }).join('');
 
   } else if (tab === 'systems') {
-    document.getElementById('count').textContent =
-      state.systems.filter(s => s.emu_found).length + '/' + state.systems.length + ' EMULATORS READY';
-    content.innerHTML = '<table><tr><th>SYSTEM</th><th>EMULATOR</th><th>SETUP</th></tr>' +
-      state.systems.map(s => {
-        const status = s.emu_found
-          ? `<span class="ok">● FOUND</span><div class="dim">${esc(s.emu_path)}</div>`
-          : `<span class="bad">● MISSING</span>
-             <div class="dim">get <b>${esc(s.emu_name)}</b> (${esc(s.emu_site)})<br>
-             unzip into ${esc(s.emu_dir)}\\</div>`;
-        return `<tr><td><b>${esc(s.name)}</b>
-            <div class="dim">roms: ${esc(s.exts.join(' '))}<br>${esc(s.roms_dir)}\\</div></td>
-          <td>${status}</td>
-          <td><input class="cfg" id="ep-${s.id}" placeholder="custom exe path (optional)"
-                 value="${esc(s.emu_override)}">
-              <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}"
-                 title="placeholders: {emu} {rom} {romname} {romdir}">
-              <button class="act" onclick="saveSystem('${s.id}')">SAVE</button></td></tr>`;
-      }).join('') + '</table>';
+    count.textContent = state.systems.filter(s => s.emu_found).length + ' of ' +
+      state.systems.length + ' emulators ready';
+    content.innerHTML = state.systems.map(s => {
+      const status = s.emu_found
+        ? `<span class="pill ok">Ready</span>`
+        : `<span class="pill bad">Emulator missing</span>`;
+      const detail = s.emu_found
+        ? `Using <b>${esc(s.emu_path)}</b>`
+        : `Download <b>${esc(s.emu_name)}</b> from <b>${esc(s.emu_site)}</b> and unzip it into
+           <b>${esc(s.emu_dir)}\\</b> &mdash; the exe is picked up automatically.`;
+      return `<div class="card">
+        <div class="head"><span class="nm">${esc(s.name)}</span>${status}</div>
+        <div class="dim">${detail}<br>
+          Games go in <b>${esc(s.roms_dir)}\\</b> (${esc(s.exts.join(' '))})</div>
+        <div class="fields">
+          <input class="cfg" id="ep-${s.id}" placeholder="Custom emulator exe path (optional)"
+             value="${esc(s.emu_override)}">
+          <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}"
+             title="Placeholders: {emu} {rom} {romname} {romdir}">
+          <button class="txt" onclick="saveSystem('${s.id}')">Save</button>
+        </div></div>`;
+    }).join('');
 
   } else {
-    document.getElementById('count').textContent = '';
-    content.innerHTML = `<div class="settings-box">
-      <h2>LIBRARY FOLDER</h2>
-      <input class="cfg" id="root" value="${esc(state.library_root)}">
-      <button class="act" onclick="saveSettings()">SAVE &amp; RESCAN</button>
-      <button class="act" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
-      <h2>HOW IT WORKS</h2>
-      <p>RetroShelf scans one library folder. Inside it:</p>
-      <p><code>roms\&lt;system&gt;\</code> &mdash; your game files (subfolders are fine)<br>
-         <code>emulators\&lt;system&gt;\</code> &mdash; the emulator, unzipped; the exe is found automatically<br>
-         <code>art\&lt;system&gt;\</code> &mdash; optional box art named exactly like the rom file</p>
-      <p>Box art is also picked up from an image next to the rom, or an
-         <code>art\</code> / <code>covers\</code> subfolder beside it.</p>
-      <p>The SYSTEMS tab shows every folder name, which emulator to download for it,
-         and lets you point at a custom exe or edit the launch arguments.</p>
-    </div>`;
+    count.textContent = '';
+    content.innerHTML = `<div class="card">
+        <div class="head"><span class="nm">Library folder</span></div>
+        <div class="fields">
+          <input class="cfg" id="root" value="${esc(state.library_root)}">
+          <button class="filled" onclick="saveSettings()">Save &amp; rescan</button>
+          <button class="outlined" onclick="mkdirs()">Create folder layout</button>
+        </div></div>
+      <div class="card howto">
+        <h3>How it works</h3>
+        RetroShelf scans one library folder. Inside it:<br>
+        <code>roms\&lt;system&gt;\</code> &mdash; your game files (subfolders are fine)<br>
+        <code>emulators\&lt;system&gt;\</code> &mdash; the emulator, unzipped; the exe is found automatically<br>
+        <code>art\&lt;system&gt;\</code> &mdash; cover images named exactly like the rom file<br>
+        <code>art\&lt;system&gt;\screens\</code> &mdash; gameplay screenshots, same naming
+        <h3>Art shortcuts</h3>
+        A cover can also sit right next to the rom (same name, .png/.jpg), or in an
+        <code>art\</code> / <code>covers\</code> subfolder beside it. Screenshots can sit in a
+        <code>screens\</code> or <code>screenshots\</code> subfolder next to the roms.
+        <h3>Launching</h3>
+        Click a game and it opens in the matching emulator. The Systems tab lets you
+        point at a custom exe or tweak launch arguments per system.
+      </div>`;
   }
 }
 
@@ -600,21 +655,21 @@ async function saveSystem(id) {
     body: JSON.stringify({id: id,
       emu_path: document.getElementById('ep-' + id).value,
       args: document.getElementById('ar-' + id).value})});
-  toast('★ SAVED');
+  snack('Saved');
   refresh();
 }
 
 async function saveSettings() {
   await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({library_root: document.getElementById('root').value})});
-  toast('★ SAVED');
+  snack('Saved');
   refresh();
 }
 
 async function mkdirs() {
   const r = await (await fetch('/api/mkdirs', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: '{}'})).json();
-  toast(r.ok ? '★ FOLDERS CREATED' : '▲ ' + r.msg.toUpperCase(), !r.ok);
+  snack(r.ok ? 'Folders created' : r.msg);
   refresh();
 }
 
