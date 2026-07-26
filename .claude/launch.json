@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "retroshelf",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["C:\\projects\\retroshelf\\retroshelf.py", "--no-browser"],
+      "port": 7830
+    }
+  ]
+}
