@@ -347,7 +347,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 :root {
   --blue: #4285f4; --red: #ea4335; --yellow: #fbbc05; --green: #34a853;
@@ -356,12 +356,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #fff; color: var(--text);
-       font-family: Roboto, Arial, sans-serif; font-size: 14px; }
+       font-family: Roboto, Arial, sans-serif; font-size: 14px;
+       background-image: radial-gradient(#eceef1 1.2px, transparent 1.2px);
+       background-size: 22px 22px; }
 header { position: sticky; top: 0; z-index: 10; background: #fff; }
 .bar { display: flex; align-items: center; gap: 24px; padding: 14px 24px 8px; }
-.logo { font-size: 22px; font-weight: 400; color: var(--sub); white-space: nowrap;
-        cursor: pointer; user-select: none; }
-.logo b { font-weight: 500; color: var(--text); }
+.logo { font-family: 'Press Start 2P', monospace; font-size: 14px; color: var(--text);
+        white-space: nowrap; cursor: pointer; user-select: none; padding-top: 4px; }
+.logo b { font-weight: 400; color: var(--btn-blue); }
+.stripe { height: 4px; background: repeating-linear-gradient(90deg,
+  #4285f4 0 20px, #ea4335 20px 40px, #fbbc05 40px 60px, #34a853 60px 80px); }
 .searchwrap { flex: 1; max-width: 560px; position: relative; }
 #search {
   width: 100%; height: 46px; border: none; border-radius: 24px;
@@ -391,22 +395,30 @@ header { position: sticky; top: 0; z-index: 10; background: #fff; }
 .chip.on { background: #e8f0fe; color: #1967d2; border-color: #e8f0fe; font-weight: 500; }
 .chip span { color: var(--sub); font-size: 12px; margin-left: 4px; }
 .chip.on span { color: #1967d2; }
+.dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
+       margin-right: 7px; }
 main { max-width: 1020px; margin: 0 auto; padding: 8px 24px 60px; }
 .row {
   display: flex; align-items: center; gap: 18px; padding: 12px 14px;
-  border-radius: 12px; cursor: pointer; position: relative;
+  border-radius: 14px; cursor: pointer; position: relative;
+  background: #fff; border: 1px solid var(--line2); margin-bottom: 10px;
+  transition: box-shadow .12s, transform .12s;
 }
-.row:hover { background: var(--hover); }
-.row + .row { margin-top: 2px; }
+.row:hover { box-shadow: 0 2px 10px rgba(60,64,67,.18); transform: translateY(-1px); }
 .cover, .shot {
   border-radius: 8px; background: var(--ph); flex-shrink: 0; overflow: hidden;
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: center; justify-content: center; position: relative;
+}
+.cover::after, .shot::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.07) 0 1px, transparent 1px 3px);
 }
 .cover { width: 72px; height: 96px; }
 .shot { width: 170px; height: 96px; }
 .cover img, .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.cover .ph { font-size: 24px; font-weight: 500; color: #bdc1c6; }
-.shot .ph2 { font-size: 11px; color: #bdc1c6; }
+.cover .ph { font-family: 'Press Start 2P', monospace; font-size: 15px; color: #fff;
+             text-shadow: 1px 2px 0 rgba(0,0,0,.35); }
+.shot .ph2 { font-family: 'Press Start 2P', monospace; font-size: 7px; color: #bdc1c6; }
 .info { min-width: 0; flex: 1; }
 .info .nm { font-size: 16px; font-weight: 500; color: var(--text);
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -419,8 +431,10 @@ main { max-width: 1020px; margin: 0 auto; padding: 8px 24px 60px; }
   box-shadow: 0 1px 3px rgba(60,64,67,.3);
 }
 .row:hover .playbtn { opacity: 1; }
-.empty { text-align: center; padding: 90px 20px; color: var(--sub); line-height: 2; }
-.empty .big { font-size: 20px; color: var(--text); margin-bottom: 8px; }
+.empty { text-align: center; padding: 90px 20px; color: var(--sub); line-height: 2;
+         background: #fff; border: 1px solid var(--line2); border-radius: 14px; }
+.empty .big { font-family: 'Press Start 2P', monospace; font-size: 15px;
+              color: var(--text); margin-bottom: 18px; }
 .empty code { background: var(--ph); border-radius: 4px; padding: 2px 8px;
               font-size: 13px; }
 .card {
@@ -476,7 +490,7 @@ button.outlined:hover { background: #f6f9fe; }
 <body>
 <header>
   <div class="bar">
-    <div class="logo" onclick="setTab('games')"><b>Retro</b>Shelf</div>
+    <div class="logo" onclick="setTab('games')">RETRO<b>SHELF</b></div>
     <div class="searchwrap">
       <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
       <input id="search" placeholder="Search your games" oninput="render()" autocomplete="off">
@@ -489,6 +503,7 @@ button.outlined:hover { background: #f6f9fe; }
     <button id="tab-settings" onclick="setTab('settings')">Settings</button>
   </div>
   <div class="chips" id="chips"></div>
+  <div class="stripe"></div>
 </header>
 <main id="content"></main>
 <div id="snack"></div>
@@ -496,6 +511,14 @@ button.outlined:hover { background: #f6f9fe; }
 let state = null;
 let tab = 'games';
 let sel = 'all';
+
+const SYSCOLORS = {
+  nes: '#e60012', snes: '#7b5aa6', n64: '#009e60', gb: '#8b956d',
+  gba: '#5c67c6', nds: '#7f8ea3', gamecube: '#6a5fc1', wii: '#3aa6dd',
+  genesis: '#0060a8', dreamcast: '#f0762f', ps1: '#4f5bd5', ps2: '#2a3b8f',
+  psp: '#4a4f57', arcade: '#d81b60', atari2600: '#b7410e'
+};
+function sysColor(id) { return SYSCOLORS[id] || '#5f6368'; }
 
 async function refresh() {
   state = await (await fetch('/api/state')).json();
@@ -559,7 +582,7 @@ function render() {
     chips.innerHTML =
       `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';render()">All<span>${allGames().length}</span></div>` +
       withGames.map(s =>
-        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()">${esc(s.name)}<span>${s.games.length}</span></div>`
+        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';render()"><span class="dot" style="background:${sysColor(s.id)}"></span>${esc(s.name)}<span>${s.games.length}</span></div>`
       ).join('');
 
     let games = sel === 'all' ? allGames()
@@ -572,7 +595,7 @@ function render() {
 
     if (!games.length) {
       content.innerHTML = `<div class="empty">
-        <div class="big">No games yet</div>
+        <div class="big">INSERT CARTRIDGE</div>
         Drop your rom files into <code>${esc(state.library_root)}\\roms\\&lt;system&gt;\\</code><br>
         then refresh this page. The <b>Systems</b> tab lists every folder name.</div>`;
       return;
@@ -581,13 +604,15 @@ function render() {
       const cover = g.art
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
         : `<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
+      const coverBg = g.art ? '' :
+        ` style="background:linear-gradient(150deg, ${sysColor(g.sysId)}, #23252b)"`;
       const shot = g.shot
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&kind=screen&rom=${encodeURIComponent(g.file)}">`
-        : `<span class="ph2">no screenshot</span>`;
+        : `<span class="ph2">NO SCREENSHOT</span>`;
       const sub = [g.sysName, g.plays ? g.plays + (g.plays === 1 ? ' play' : ' plays') : null,
                    ago(g.last) || null].filter(Boolean).join(' · ');
       return `<div class="row" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
-        <div class="cover">${cover}</div>
+        <div class="cover"${coverBg}>${cover}</div>
         <div class="shot">${shot}</div>
         <div class="info"><div class="nm">${esc(g.name)}</div>
           <div class="sub">${esc(sub)}</div></div>
@@ -606,7 +631,7 @@ function render() {
         : `Download <b>${esc(s.emu_name)}</b> from <b>${esc(s.emu_site)}</b> and unzip it into
            <b>${esc(s.emu_dir)}\\</b> &mdash; the exe is picked up automatically.`;
       return `<div class="card">
-        <div class="head"><span class="nm">${esc(s.name)}</span>${status}</div>
+        <div class="head"><span class="dot" style="background:${sysColor(s.id)}"></span><span class="nm">${esc(s.name)}</span>${status}</div>
         <div class="dim">${detail}<br>
           Games go in <b>${esc(s.roms_dir)}\\</b> (${esc(s.exts.join(' '))})</div>
         <div class="fields">
