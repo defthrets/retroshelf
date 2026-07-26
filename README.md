@@ -1,8 +1,10 @@
 # RetroShelf
 
 Single-file retro game launcher for Windows. No dependencies — just Python 3.
-Serves a local web GUI (http://127.0.0.1:7830) that scans your library folder,
-shows every game with box art, and launches the right emulator per system.
+Serves a local web GUI (http://127.0.0.1:7830) in a clean Google Material
+style: one big searchable list of your games, each row showing the box cover
+and a gameplay screenshot. Click a game and it launches straight into the
+right emulator.
 
 You supply the games and emulators yourself; RetroShelf just organises and
 launches them.
@@ -19,13 +21,15 @@ Settings). Use **Settings > Create Folder Layout** to build it:
 
 ```
 C:\RetroShelf\
-  roms\<system>\        drop game files here (subfolders fine)
-  emulators\<system>\   unzip the emulator here — the exe is found automatically
-  art\<system>\         optional box art, named exactly like the rom file
+  roms\<system>\           drop game files here (subfolders fine)
+  emulators\<system>\      unzip the emulator here — the exe is found automatically
+  art\<system>\            box cover images, named exactly like the rom file
+  art\<system>\screens\    gameplay screenshots, same naming
 ```
 
-Box art is also picked up from an image sitting next to the rom, or from an
-`art\` / `covers\` subfolder beside it.
+Covers are also picked up from an image sitting next to the rom or from an
+`art\` / `covers\` subfolder beside it; screenshots from a `screens\` or
+`screenshots\` subfolder next to the roms.
 
 ## Supported systems
 
