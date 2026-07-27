@@ -135,9 +135,11 @@ SYSTEMS = [
      "emu_name": "WinUAE", "emu_site": "winuae.net",
      "emu_url": "https://www.winuae.net/download/",
      "dl": {"url": "https://download.abime.net/winuae/releases/WinUAE6010_x64.zip"},
-     "note": "Needs Amiga Kickstart ROMs configured in WinUAE once. ADF disks "
-             "launch directly; WHDLoad archives (.lha/.rar) need a one-time "
-             "WinUAE setup (Quickstart > set Kickstart, then mount the archive)."},
+     "note": "Needs Amiga Kickstart ROMs: drop the .rom files into "
+             "emulators\\amiga\\kickstarts\\ then in WinUAE do Paths > "
+             "System ROMs > point at that folder > Rescan ROMs (one time). "
+             "ADF disks launch directly; WHDLoad archives (.lha/.rar) need "
+             "a one-time WinUAE Quickstart setup."},
 ]
 
 SYSTEMS_BY_ID = {s["id"]: s for s in SYSTEMS}
@@ -767,6 +769,20 @@ header { position: sticky; top: 0; z-index: 10;
 #search:focus { border-color: var(--amber);
   box-shadow: 0 0 12px rgba(255,176,0,.35), inset 0 0 8px rgba(255,176,0,.08); }
 #count { color: var(--muted); font-size: 18px; margin-left: auto; white-space: nowrap; }
+#padbadge { display: inline-flex; width: 26px; height: 26px; flex-shrink: 0; }
+#padbadge svg { width: 100%; height: 100%; fill: var(--line); transition: fill .2s; }
+#padbadge.on svg { fill: var(--green);
+  filter: drop-shadow(0 0 6px rgba(57,255,136,.7)); }
+#gphint { position: fixed; bottom: 0; left: 0; right: 0; text-align: center;
+  padding: 7px 10px; background: rgba(6,5,3,.92); border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 17px; z-index: 96; display: none; }
+#gphint .kb { border: 1px solid var(--dim); border-radius: 3px; padding: 0 7px;
+  color: var(--amber); margin: 0 3px 0 10px; }
+.row.gpsel { border-color: var(--amber);
+  box-shadow: 0 0 18px rgba(255,176,0,.28), inset 0 0 24px rgba(255,176,0,.05);
+  transform: translateX(5px); }
+.row.gpsel .info .nm { color: var(--amber2); text-shadow: 0 0 10px rgba(255,176,0,.5); }
+.row.gpsel .playbtn { opacity: 1; animation: playpulse 1s ease-in-out infinite; }
 .tabs { display: flex; gap: 6px; padding: 0 24px; }
 .tabs button { background: none; border: none; font-family: 'Press Start 2P', monospace;
   font-size: 11px; color: var(--muted); padding: 10px 14px 12px; cursor: pointer;
@@ -891,6 +907,9 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
       <input id="search" placeholder="search games..." oninput="render()" autocomplete="off">
     </div>
     <span id="count"></span>
+    <span id="padbadge" title="No controller — press any button on the pad">
+      <svg viewBox="0 0 24 24"><path d="M7 6h10c2.8 0 5 2.6 5 5.8 0 2.9-1.4 5.2-3.2 5.2-1 0-1.8-.6-2.6-1.6L15 14H9l-1.2 1.4C7 16.4 6.2 17 5.2 17 3.4 17 2 14.7 2 11.8 2 8.6 4.2 6 7 6zm-1 3v1.5H4.5V12H6v1.5h1.5V12H9v-1.5H7.5V9zm10.5.5a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2zm-2.3 2.3a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2z"/></svg>
+    </span>
   </div>
   <div class="tabs">
     <button id="tab-games" class="on" onclick="setTab('games')">GAMES</button>
@@ -900,6 +919,9 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
   <div class="chips" id="chips"></div>
 </header>
 <main id="content"></main>
+<div id="gphint"><span class="kb">▲▼</span> move <span class="kb">A</span> play
+  <span class="kb">◀▶</span> system <span class="kb">LB RB</span> tab
+  <span class="kb">Y</span> rescan <span class="kb">B</span> top</div>
 <div id="snack"></div>
 <div id="loader"><div class="inner">
   <div class="t1">NOW LOADING</div>
@@ -1106,6 +1128,7 @@ function render() {
         <div class="playbtn">▶</div></div>`;
     }).join('') + (total > shown
       ? `<div class="more"><button class="outlined" onclick="shown+=400;render()">SHOW MORE (${total - shown} left)</button></div>` : '');
+    if (activePad()) applyGpSel(false);
 
   } else if (tab === 'systems') {
     count.textContent = state.systems.filter(s => s.emu_found).length + ' of ' +
@@ -1178,6 +1201,15 @@ function render() {
         Covers: image named like the rom, next to it, or in
         <code>art\\&lt;system&gt;\\</code>. Screenshots: same name in a
         <code>screens\\</code> subfolder or <code>art\\&lt;system&gt;\\screens\\</code>.
+        <h3>CONTROLLERS</h3>
+        Plug in a pad and press any button — the indicator top-right lights up
+        and you can drive the whole launcher from the controller:
+        d-pad/stick to move, A to play, LB/RB to switch tab, Y to rescan.
+        Works with Xbox One/Series pads (native), PS4/PS5 pads, and any
+        DirectInput USB pad. PS3 pads need a Windows driver first (DsHidMini).
+        In-game controls are handled by each emulator &mdash; every bundled
+        emulator supports Xbox pads out of the box; check its input settings
+        to remap.
       </div>`;
   }
 }
@@ -1207,6 +1239,133 @@ async function mkdirs() {
   snack(r.ok ? 'FOLDERS CREATED' : r.msg);
   refresh();
 }
+
+/* ---- controller support (Gamepad API: Xbox, PlayStation, generic pads) ---- */
+let gpIndex = 0;
+const gpState = {last: {}, heldDir: null, lastMove: 0, fast: false, known: {}};
+const TABS = ['games', 'systems', 'settings'];
+
+function padName(id) {
+  const s = (id || '').toLowerCase();
+  if (s.includes('xbox') || s.includes('xinput')) return 'Xbox controller';
+  if (s.includes('054c') || s.includes('sony') || s.includes('dualshock') ||
+      s.includes('dualsense') || s.includes('playstation')) return 'PlayStation controller';
+  return 'Controller';
+}
+
+function activePad() {
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const g of gps) if (g && g.connected) return g;
+  return null;
+}
+
+function updatePadBadge(gp) {
+  const b = document.getElementById('padbadge');
+  const hint = document.getElementById('gphint');
+  if (gp) {
+    b.classList.add('on');
+    b.title = padName(gp.id) + ' connected — ' + gp.id;
+    hint.style.display = 'block';
+  } else {
+    b.classList.remove('on');
+    b.title = 'No controller — press any button on the pad';
+    hint.style.display = 'none';
+  }
+}
+
+window.addEventListener('gamepadconnected', e => {
+  gpState.known[e.gamepad.index] = true;
+  updatePadBadge(e.gamepad);
+  snack(padName(e.gamepad.id).toUpperCase() + ' CONNECTED');
+});
+window.addEventListener('gamepaddisconnected', e => {
+  delete gpState.known[e.gamepad.index];
+  const gp = activePad();
+  updatePadBadge(gp);
+  if (!gp) snack('CONTROLLER DISCONNECTED');
+});
+
+function applyGpSel(scroll) {
+  const rows = document.querySelectorAll('.row');
+  if (!rows.length) return;
+  gpIndex = Math.max(0, Math.min(gpIndex, rows.length - 1));
+  rows.forEach(r => r.classList.remove('gpsel'));
+  rows[gpIndex].classList.add('gpsel');
+  if (scroll) rows[gpIndex].scrollIntoView({block: 'center'});
+}
+
+function moveSel(dy) {
+  if (tab !== 'games') return;
+  gpIndex += dy;
+  applyGpSel(true);
+}
+
+function moveChip(dx) {
+  if (tab !== 'games') return;
+  const ids = ['all'].concat(state.systems.filter(s => s.games.length).map(s => s.id));
+  let i = ids.indexOf(sel) + dx;
+  i = (i + ids.length) % ids.length;
+  sel = ids[i];
+  gpIndex = 0;
+  shown = 400;
+  render();
+  applyGpSel(true);
+}
+
+function activateSel() {
+  if (tab !== 'games') return;
+  const rows = document.querySelectorAll('.row');
+  if (rows[gpIndex]) rows[gpIndex].click();
+}
+
+function cycleTab(d) {
+  let i = (TABS.indexOf(tab) + d + TABS.length) % TABS.length;
+  setTab(TABS[i]);
+  if (tab === 'games') applyGpSel(false);
+}
+
+function pollPads() {
+  requestAnimationFrame(pollPads);
+  const gp = activePad();
+  if (!gp) return;
+  if (!gpState.known[gp.index]) {         // pad was connected before page load
+    gpState.known[gp.index] = true;
+    updatePadBadge(gp);
+  }
+  const now = performance.now();
+  const btn = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  const ax = i => gp.axes[i] || 0;
+  const pressed = {};
+  for (const i of [0, 1, 3, 4, 5]) {
+    pressed[i] = btn(i) && !gpState.last[i];
+    gpState.last[i] = btn(i);
+  }
+  let dy = 0, dx = 0;
+  if (btn(12) || ax(1) < -0.5) dy = -1;
+  else if (btn(13) || ax(1) > 0.5) dy = 1;
+  if (btn(14) || ax(0) < -0.5) dx = -1;
+  else if (btn(15) || ax(0) > 0.5) dx = 1;
+  if (dy || dx) {
+    const dir = dx + ',' + dy;
+    const first = gpState.heldDir !== dir;
+    if (first || now - gpState.lastMove > (gpState.fast ? 90 : 320)) {
+      if (!first) gpState.fast = true;
+      gpState.heldDir = dir;
+      gpState.lastMove = now;
+      if (dy) moveSel(dy);
+      if (dx) moveChip(dx);
+    }
+  } else {
+    gpState.heldDir = null;
+    gpState.fast = false;
+  }
+  if (pressed[0]) activateSel();                                  // A / Cross
+  if (pressed[1]) { gpIndex = 0; applyGpSel(true); }              // B / Circle
+  if (pressed[3]) { snack('RESCANNING...'); refresh(true); }      // Y / Triangle
+  if (pressed[4]) cycleTab(-1);                                   // LB / L1
+  if (pressed[5]) cycleTab(1);                                    // RB / R1
+}
+pollPads();
 
 refresh();
 </script>
