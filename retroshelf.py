@@ -2114,19 +2114,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <title>RetroShelf</title>
-<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAzElEQVR4nGNkgAJWFq7/DHQEv/98YwTRTAwDDBjp7XN0wMQwwIAFXeBy8XSaWqjbmznIQ0B9xTm6OoCJYbCFwM3f71H40W+OUGTBUhGbIRYC6qyCKHxOJjaKLEA3b+ilge//flFkAbp5gz8E1NHi7IykL00dwMQw2NMArQETw2BPA8M+BBhxtYgui4VQ1SLdV2uGSBrAlRbYns5mIAX8kk4lSh0Tw2ANgZsUlgfE6mdiGO79gt93voJpVhXuERoChAATwwADRhhjxPaOAcdnMynNE4fbAAAAAElFTkSuQmCC">
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAzklEQVR4nGNkgAJWFq7/DHQEv/98YwTRTAwDDBjp7XN0wMQwwIAFXeDyZB+aWqibu2WQh4D640N0dQATw2ALgZtv/6DwI9d+pMiC5cH8QywE1IVRhThZwAUW2QDdvKGXBr7/oaygRDdv8IeAOlqcnUsTpqkDmBgGexqgNWBiGOxpYNiHACOuFtHlZC6qWqQ799vgDAEWXBLoaYGt6xNJBv8q4yNKHRPDYA2BmxSWB8TqZ2IY7v2C37/rwDQra9MIDQFCgIlhgAEjjDFie8cAyJEzbA5LhBYAAAAASUVORK5CYII=">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
 :root {
-  /* cold, gloomy cyberpunk: dead-black panels, toxic magenta, sick cyan */
-  --bg: #05040a; --panel: #0c0a14; --panel2: #14101f; --line: #2b2140;
-  --amber: #ff1f6f; --amber2: #ff74ab; --dim: #7a2b52; --text: #c6bfd6;
-  --muted: #6d6486; --green: #00ffa8; --red: #ff2f4a; --cyan: #00e0ff;
-  --glow: 255,31,111;        /* magenta glow */
+  /* gloomy cyberpunk: dead-black panels, sodium orange, magenta + cyan neon */
+  --bg: #05040a; --panel: #0d0b13; --panel2: #16121c; --line: #33263a;
+  --amber: #ff7a18; --amber2: #ffb266; --dim: #8f4a14; --text: #cdc4d2;
+  --muted: #7a7089; --green: #00ff88; --red: #ff2f4a;
+  --cyan: #00e0ff; --magenta: #ff1f6f;
+  --glow: 255,122,24;        /* orange glow */
   --glow2: 0,224,255;        /* cyan glow */
+  --glow3: 255,31,111;       /* magenta glow */
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -2137,9 +2139,10 @@ html { scrollbar-color: var(--dim) var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 body {
   background:
-    radial-gradient(ellipse at 18% 0%, rgba(255,31,111,.10), transparent 55%),
-    radial-gradient(ellipse at 85% 8%, rgba(0,224,255,.07), transparent 50%),
-    radial-gradient(ellipse at 50% 20%, #0d0a16 0%, #07060d 60%, #040307 100%);
+    radial-gradient(ellipse at 18% 0%, rgba(255,122,24,.11), transparent 55%),
+    radial-gradient(ellipse at 85% 6%, rgba(255,31,111,.07), transparent 48%),
+    radial-gradient(ellipse at 60% 100%, rgba(0,224,255,.05), transparent 45%),
+    radial-gradient(ellipse at 50% 20%, #0e0a12 0%, #08060c 60%, #040307 100%);
   color: var(--text); font-family: VT323, monospace; font-size: 19px;
   overflow: hidden; display: flex; flex-direction: column;
 }
@@ -2150,8 +2153,8 @@ a:hover { text-shadow: 0 0 8px rgba(var(--glow),.6); }
   position: fixed; bottom: -6vh; left: -50%; width: 200%; height: 44vh;
   pointer-events: none; z-index: 0; opacity: .22;
   background:
-    repeating-linear-gradient(90deg, rgba(var(--glow2),.20) 0 2px, transparent 2px 70px),
-    repeating-linear-gradient(0deg, rgba(var(--glow),.20) 0 2px, transparent 2px 46px);
+    repeating-linear-gradient(90deg, rgba(var(--glow2),.18) 0 2px, transparent 2px 70px),
+    repeating-linear-gradient(0deg, rgba(var(--glow3),.18) 0 2px, transparent 2px 46px);
   transform: perspective(420px) rotateX(62deg);
   animation: gridmove 1.5s linear infinite;
   -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
@@ -2208,14 +2211,18 @@ header { flex-shrink: 0; background: rgba(8,6,14,.94); border-bottom: 1px solid 
 .bar { display: flex; align-items: center; gap: 18px; padding: 8px 20px 8px; }
 .logo { display: flex; align-items: flex-end; gap: 4px; white-space: nowrap;
   cursor: pointer; user-select: none; overflow: hidden; }
-.logo pre { margin: 0; font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 10.5px; line-height: 1.2; font-weight: 400; letter-spacing: 0;
-  background: linear-gradient(100deg, #2a0a2e 0%, var(--amber) 18%,
-    #ffd9ea 28%, var(--cyan) 38%, var(--amber) 58%, #2a0a2e 100%);
+.logo pre { margin: 0;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 10.5px; line-height: 1.2; font-weight: 800; letter-spacing: 0;
+  -webkit-text-stroke: .35px currentColor;
+  background: linear-gradient(100deg, #2a1408 0%, var(--amber) 16%,
+    #ffe6c2 26%, var(--magenta) 34%, var(--cyan) 42%, var(--amber) 58%,
+    #2a1408 100%);
   background-size: 260% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
   animation: shimmer 5s linear infinite;
-  filter: drop-shadow(0 0 6px rgba(var(--glow),.5)); }
+  filter: drop-shadow(0 0 5px rgba(var(--glow),.55))
+          drop-shadow(0 0 1px rgba(var(--glow),.9)); }
 @keyframes shimmer {
   from { background-position-x: 260%; }
   to { background-position-x: -60%; } }
@@ -2412,13 +2419,27 @@ button.danger:disabled { background: var(--line); color: var(--muted); cursor: d
 .card:hover { border-color: var(--dim); }
 .card .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .card .head .nm { font-size: 24px; color: var(--amber2); }
-.pill { border-radius: 3px; padding: 2px 12px; font-size: 17px; border: 1px solid; }
-.pill.ok { border-color: var(--green); color: var(--green); text-shadow: 0 0 8px rgba(0,255,168,.5); }
-.pill.bad { border-color: var(--red); color: var(--red); text-shadow: 0 0 8px rgba(255,47,74,.5); }
-.pill.dlp { border-color: var(--amber); color: var(--amber);
+.pill { border-radius: 3px; padding: 2px 12px 2px 10px; font-size: 17px;
+  border: 1px solid; display: inline-flex; align-items: center; gap: 7px; }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; flex-shrink: 0;
+  box-shadow: 0 0 7px currentColor, 0 0 2px #fff inset; }
+.pill.ok { border-color: rgba(0,255,136,.5); color: var(--green);
+  background: rgba(0,255,136,.06); text-shadow: 0 0 8px rgba(0,255,136,.4); }
+.pill.bad { border-color: rgba(255,47,74,.5); color: var(--red);
+  background: rgba(255,47,74,.06); text-shadow: 0 0 8px rgba(255,47,74,.4); }
+.pill.bad::before { animation: ledblink 1.8s ease-in-out infinite; }
+@keyframes ledblink { 0%,100% { opacity: 1; } 55% { opacity: .25; } }
+.pill.dlp { border-color: rgba(var(--glow),.5); color: var(--amber);
+  background: rgba(var(--glow),.07);
   text-shadow: 0 0 8px rgba(var(--glow),.5); animation: pulse 1s steps(2) infinite; }
 .dim { color: var(--muted); font-size: 18px; margin-top: 8px; line-height: 1.5; word-break: break-all; }
 .dim b { color: var(--text); font-weight: 400; }
+.led { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 7px; vertical-align: 1px; }
+.led.ok { background: var(--green); box-shadow: 0 0 7px var(--green); }
+.led.bad { background: var(--red); box-shadow: 0 0 7px var(--red);
+  animation: ledblink 1.8s ease-in-out infinite; }
 .err { color: var(--red); font-size: 17px; margin-left: 10px; }
 .fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
 .flabel { color: var(--dim); font-size: 17px; width: 100%; margin: 8px 0 -8px; }
@@ -3046,8 +3067,8 @@ function renderPage(){
         and unzip into <b>${esc(s.emu_dir)}\\</b>.`;
       const note=s.note?`<div class="dim">▲ ${esc(s.note)}</div>`:'';
       const bios=s.bios_needed?`<div class="dim">${s.bios_count
-        ?`<span style="color:var(--green)">● BIOS OK</span> &mdash; ${s.bios_count} file${s.bios_count===1?'':'s'} installed from <b>${esc(s.bios_dir)}\\</b>`
-        :`<span style="color:var(--red)">● BIOS NEEDED</span> &mdash; put the ${esc(s.bios_hint)} into <b>${esc(s.bios_dir)}\\</b> and RetroShelf installs it for you`}</div>`:'';
+        ?`<span class="led ok"></span><span style="color:var(--green)">BIOS OK</span> &mdash; ${s.bios_count} file${s.bios_count===1?'':'s'} installed from <b>${esc(s.bios_dir)}\\</b>`
+        :`<span class="led bad"></span><span style="color:var(--red)">BIOS NEEDED</span> &mdash; put the ${esc(s.bios_hint)} into <b>${esc(s.bios_dir)}\\</b> and RetroShelf installs it for you`}</div>`:'';
       const dlbtn=(!s.emu_found&&!busy&&s.dl==='auto')
         ?`<button class="filled" onclick="download('${s.id}')">DOWNLOAD ${esc(s.emu_name.toUpperCase())}</button>`:'';
       return `<div class="card">
