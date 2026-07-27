@@ -138,6 +138,17 @@ SYSTEMS = [
      "emu_url": "https://vice-emu.sourceforge.io/index.html#download",
      "dl": {"url": "https://sourceforge.net/projects/vice-emu/files/releases/"
                    "binaries/windows/GTK3VICE-3.9-win64.zip/download"}},
+    {"id": "3do", "name": "Panasonic 3DO",
+     "exes": ["retroarch.exe"],
+     "args": '"{emu}" -L "{emudir}\\cores\\opera_libretro.dll" "{rom}" -f',
+     "emu_name": "RetroArch + Opera core", "emu_site": "retroarch.com",
+     "emu_url": "https://www.retroarch.com/?page=platforms",
+     "dl": {"parts": [
+         {"resolve": "retroarch"},
+         {"url": "https://buildbot.libretro.com/nightly/windows/x86_64/latest/"
+                 "opera_libretro.dll.zip", "sub": "cores"}]},
+     "note": "Needs a 3DO BIOS (panafz10.bin is the usual one). Games in "
+             "zip/7z/rar are unpacked automatically on first launch."},
     {"id": "amiga", "name": "Commodore Amiga",
      "exes": ["winuae64.exe", "winuae.exe"], "args": '"{emu}" -0 "{rom}" -G',
      "emu_name": "WinUAE", "emu_site": "winuae.net",
@@ -168,20 +179,20 @@ UNIQUE_EXTS = {
 }
 AMBIG_EXTS = {
     ".zip": ["arcade", "nes", "snes", "n64", "gb", "gba", "genesis", "atari2600",
-             "ps1", "amiga", "c64"],
-    ".7z": ["arcade", "ps1", "amiga"],
-    ".iso": ["ps2", "psp", "ps1", "gamecube", "wii"],
-    ".bin": ["genesis", "atari2600", "ps1", "c64"],
-    ".chd": ["ps1", "ps2", "dreamcast", "psp"],
-    ".cue": ["ps1", "dreamcast"],
+             "ps1", "amiga", "c64", "3do"],
+    ".7z": ["arcade", "ps1", "amiga", "3do"],
+    ".iso": ["ps2", "psp", "ps1", "gamecube", "wii", "3do"],
+    ".bin": ["genesis", "atari2600", "ps1", "c64", "3do"],
+    ".chd": ["ps1", "ps2", "dreamcast", "psp", "3do"],
+    ".cue": ["ps1", "dreamcast", "3do"],
     ".img": ["ps1"],
     ".ecm": ["ps1"],
     ".mds": ["ps1"],
-    ".rar": ["amiga", "ps1"],
+    ".rar": ["amiga", "ps1", "3do"],
 }
 ARCHIVE_EXTS = {".zip", ".7z", ".rar"}
 # systems whose games are disc images; archives are unpacked before launching
-DISC_SYSTEMS = {"ps1", "ps2", "psp", "dreamcast", "gamecube", "wii"}
+DISC_SYSTEMS = {"ps1", "ps2", "psp", "dreamcast", "gamecube", "wii", "3do"}
 DISC_PLAYABLE = [".cue", ".chd", ".m3u", ".pbp", ".iso", ".img", ".bin", ".gdi",
                  ".cdi", ".cso", ".mds"]
 # Folder-name hints (checked deepest folder first; more specific systems first)
@@ -203,6 +214,7 @@ HINTS = {
     "atari2600": ["atari", "2600"],
     "c64": ["c64", "commodore 64", "commodore64"],
     "amiga": ["amiga", "whdload"],
+    "3do": ["3do", "panasonic 3do", "tresdo"],
 }
 SKIP_DIRS = {"art", "covers", "screens", "screenshots", "emulators", "boxart",
              "boxarts", "named_boxarts", "named_snaps", "named_titles",
@@ -497,7 +509,22 @@ def _set_dl(sysid, **kw):
         DOWNLOADS.setdefault(sysid, {}).update(kw)
 
 
+def _latest_retroarch():
+    req = urllib.request.Request("https://buildbot.libretro.com/stable/",
+                                 headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        html = r.read().decode("utf-8", "replace")
+    vers = set(re.findall(r"/stable/(\d+(?:\.\d+)+)/", html))
+    if not vers:
+        raise RuntimeError("could not find a RetroArch release")
+    best = max(vers, key=lambda v: tuple(int(x) for x in v.split(".")))
+    return ("https://buildbot.libretro.com/stable/" + best
+            + "/windows/x86_64/RetroArch.7z")
+
+
 def _resolve_dl_url(spec):
+    if spec.get("resolve") == "retroarch":
+        return _latest_retroarch()
     if "url" in spec:
         return spec["url"]
     req = urllib.request.Request(
@@ -512,35 +539,57 @@ def _resolve_dl_url(spec):
     raise RuntimeError("no matching release asset found")
 
 
-def _download_worker(sysdef, emulators_root):
-    sysid = sysdef["id"]
-    try:
-        _set_dl(sysid, status="resolving", pct=0, msg="")
-        url = _resolve_dl_url(sysdef["dl"])
-        dest = Path(emulators_root) / sysid
-        dest.mkdir(parents=True, exist_ok=True)
-        tmp = dest / "_retroshelf_download.zip"
-        req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
-        with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            got = 0
-            _set_dl(sysid, status="downloading")
-            while True:
-                chunk = r.read(1 << 16)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if total:
-                    _set_dl(sysid, pct=int(got * 100 / total))
-        _set_dl(sysid, status="extracting", pct=100)
+def _fetch_and_extract(sysid, spec, dest):
+    url = _resolve_dl_url(spec)
+    dest.mkdir(parents=True, exist_ok=True)
+    suffix = ".7z" if url.lower().endswith(".7z") else ".zip"
+    tmp = dest / ("_retroshelf_download" + suffix)
+    req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        got = 0
+        _set_dl(sysid, status="downloading")
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            if total:
+                _set_dl(sysid, pct=int(got * 100 / total))
+    _set_dl(sysid, status="extracting", pct=100)
+    if suffix == ".zip":
         droot = dest.resolve()
         with zipfile.ZipFile(tmp) as z:
             for m in z.infolist():
                 tgt = (dest / m.filename).resolve()
                 if tgt == droot or droot in tgt.parents:
                     z.extract(m, dest)
-        tmp.unlink(missing_ok=True)
+    else:
+        extract_archive(tmp, dest)
+    tmp.unlink(missing_ok=True)
+
+
+def _download_worker(sysdef, emulators_root):
+    sysid = sysdef["id"]
+    try:
+        _set_dl(sysid, status="resolving", pct=0, msg="")
+        dest = Path(emulators_root) / sysid
+        spec = sysdef["dl"]
+        parts = spec.get("parts") or [spec]
+        for part in parts:
+            target = dest
+            sub = part.get("sub")
+            if sub:
+                # place extras (e.g. cores) beside the emulator executable
+                base = dest
+                wanted = [n.lower() for n in sysdef["exes"]]
+                for p in dest.rglob("*.exe"):
+                    if p.name.lower() in wanted:
+                        base = p.parent
+                        break
+                target = base / sub
+            _fetch_and_extract(sysid, part, target)
         _set_dl(sysid, status="done", msg="installed")
     except Exception as e:  # report any failure to the UI
         _set_dl(sysid, status="error", msg=str(e))
@@ -688,6 +737,7 @@ LIBRETRO_SYS = {
     "atari2600": "Atari - 2600",
     "c64": "Commodore - 64",
     "amiga": "Commodore - Amiga",
+    "3do": "The 3DO Company - 3DO",
 }
 
 SHOTS = {}
@@ -821,6 +871,7 @@ LB_PLATFORM = {
     "atari2600": "Atari 2600",
     "c64": "Commodore 64",
     "amiga": "Commodore Amiga",
+    "3do": "3DO Interactive Multiplayer",
 }
 LB_EXTRA = {"gb": ["Nintendo Game Boy Color"],
             "amiga": ["Commodore Amiga CD32"]}
@@ -1254,6 +1305,8 @@ BIOS_RULES = {
             "hint": "PS2 BIOS, e.g. SCPH-70012.bin (+ its .MEC/.NVM files)"},
     "dreamcast": {"dirs": ["data"], "portable": None,
                   "hint": "Dreamcast dc_boot.bin and dc_flash.bin"},
+    "3do": {"dirs": ["system"], "portable": None,
+            "hint": "3DO BIOS, e.g. panafz10.bin"},
     "amiga": {"dirs": [], "portable": None,
               "hint": "Amiga Kickstart roms (kickstarts folder)"},
 }
@@ -1412,6 +1465,7 @@ def launch_game(cfg, system_id, rom):
         args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
         cmd = (args_tpl
                .replace("{emu}", str(emu))
+               .replace("{emudir}", str(emu.parent))
                .replace("{rom}", str(play_path))
                .replace("{romname}", play_path.stem)
                .replace("{romdir}", str(play_path.parent)))
@@ -1961,7 +2015,7 @@ const META = {
   ps1:['#4f5bd5','PS1','disc'], ps2:['#2a3b8f','PS2','disc'],
   psp:['#8a8f98','PSP','hand'], arcade:['#d81b60','ARC','arc'],
   atari2600:['#b7410e','2600','cart'], c64:['#a97142','C64','comp'],
-  amiga:['#d33f49','AMIGA','comp']
+  amiga:['#d33f49','AMIGA','comp'], '3do':['#b9312c','3DO','disc']
 };
 const ICONS = {
   cart: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M4 3h16v10h-3v5H7v-5H4z"/><rect x="7.5" y="6" width="9" height="3.5" fill="rgba(0,0,0,.45)"/></svg>`,
