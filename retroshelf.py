@@ -1285,16 +1285,41 @@ def find_7z():
     return shutil.which("7z")
 
 
+def check_archive(path):
+    """Spot part-downloaded files early: they are usually pre-allocated at full
+    size and still full of zeros, which 7-Zip only reports as "Is not archive".
+    Extensions are not trusted - plenty of .zip files are really 7z or rar, and
+    7-Zip opens them by content."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError as e:
+        raise RuntimeError("cannot read " + path.name + ": " + str(e))
+    if not head.strip(b"\x00"):
+        raise RuntimeError(path.name + " has no data yet - it looks like it is "
+                           "still downloading. Try again once it finishes.")
+
+
 def extract_archive(archive, dest):
     exe = find_7z()
     if not exe:
         raise RuntimeError("7-Zip not found - install it from 7-zip.org")
+    check_archive(Path(archive))
     dest.mkdir(parents=True, exist_ok=True)
     r = subprocess.run([exe, "x", "-y", "-o" + str(dest), str(archive)],
                        capture_output=True, creationflags=_NOWIN)
     if r.returncode != 0:
-        raise RuntimeError("extract failed: "
-                           + r.stderr.decode(errors="replace")[:200])
+        err = r.stderr.decode(errors="replace")
+        if "Is not archive" in err or "Cannot open the file" in err:
+            raise RuntimeError(Path(archive).name + " could not be opened - the "
+                               "download is probably incomplete or corrupt.")
+        if "There is not enough space" in err or "disk full" in err.lower():
+            raise RuntimeError("not enough disk space to unpack "
+                               + Path(archive).name)
+        # keep the tail of 7-Zip's message, it names the actual problem
+        tail = [l for l in err.splitlines() if l.strip()][-1:] or ["unknown error"]
+        raise RuntimeError("could not unpack " + Path(archive).name
+                           + ": " + tail[0][:120])
 
 
 def _amiga_dirs(cfg):
@@ -1921,7 +1946,7 @@ def launch_game(cfg, system_id, rom):
             try:
                 play_path = unpack_disc(cfg, system_id, rom_path)
             except Exception as e:
-                return False, "could not unpack: " + str(e)
+                return False, str(e)
         args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
         cmd = (args_tpl
                .replace("{emu}", str(emu))
@@ -2281,8 +2306,11 @@ header { flex-shrink: 0; background: rgba(8,6,14,.94); border-bottom: 1px solid 
 /* grid */
 #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
   gap: 16px; }
-.tile { cursor: pointer; position: relative; animation: rowin .3s ease-out both; }
-@keyframes rowin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.tile { cursor: pointer; position: relative; }
+/* the whole grid fades in once - per-tile animations could leave hundreds of
+   tiles stuck invisible if the compositor throttles them */
+#grid, #view > .row:first-child { animation: rowin .28s ease-out; }
+@keyframes rowin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .tile .box { aspect-ratio: 3/4; border-radius: 5px; overflow: hidden; background: var(--panel2);
   border: 2px solid var(--line); display: flex; align-items: center; justify-content: center;
   position: relative; transition: border-color .13s, box-shadow .13s, transform .13s; }
@@ -2307,7 +2335,6 @@ header { flex-shrink: 0; background: rgba(8,6,14,.94); border-bottom: 1px solid 
 .row { display: flex; align-items: center; gap: 16px; padding: 9px 12px;
   border-radius: 6px; cursor: pointer; background: var(--panel);
   border: 1px solid var(--line); margin-bottom: 8px;
-  animation: rowin .3s ease-out both;
   transition: box-shadow .13s, border-color .13s, transform .13s; }
 .row:hover { border-color: var(--dim); }
 .row.sel { border-color: var(--amber); transform: translateX(5px);
@@ -2747,7 +2774,6 @@ function render(){
         :`<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
       const bg=g.art?'':` style="background:linear-gradient(150deg,${sysColor(g.sysId)},#0f0b18)"`;
       return `<div class="tile${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
-        style="animation-delay:${Math.min(i,20)*22}ms"
         onclick="pick(${i})" ondblclick="playIdx(${i})">
         <div class="box"${bg}>${art}${g.fav?'<span class="fav">★</span>':''}
           ${g.copies>1?`<span class="copies">${g.copies}</span>`:''}</div>
@@ -2766,7 +2792,6 @@ function render(){
         g.plays?g.plays+(g.plays===1?' play':' plays'):null,
         g.last?'played '+ago(g.last):null].filter(Boolean).join(' · ');
       return `<div class="row${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
-        style="animation-delay:${Math.min(i,16)*22}ms"
         onclick="pick(${i})" ondblclick="playIdx(${i})">
         <div class="cover"${bg}>${art}</div>
         <div class="shot">${shot}</div>
