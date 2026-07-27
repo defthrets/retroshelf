@@ -1025,21 +1025,55 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
   mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
 }
 @keyframes gridmove { from { background-position-y: 0, 0; } to { background-position-y: 0, 46px; } }
-#crt { position: fixed; inset: 0; pointer-events: none; z-index: 95;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
-  animation: flicker 5s infinite; }
+#crt { position: fixed; inset: 0; pointer-events: none; z-index: 95; }
 #crt::before { content: ""; position: absolute; inset: 0;
-  background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.5) 100%); }
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,.45) 100%); }
 #crt::after { content: ""; position: absolute; left: 0; right: 0; height: 140px;
-  background: linear-gradient(to bottom, transparent, rgba(255,214,140,.05) 45%,
-              rgba(255,214,140,.08) 50%, rgba(255,214,140,.05) 55%, transparent);
-  animation: sweep 7s linear infinite; }
+  background: linear-gradient(to bottom, transparent, rgba(255,214,140,.04) 45%,
+              rgba(255,214,140,.07) 50%, rgba(255,214,140,.04) 55%, transparent);
+  animation: sweep 8s linear infinite; }
 @keyframes sweep { from { top: -20%; } to { top: 110%; } }
-@keyframes flicker {
-  0%, 100% { opacity: 1; } 3% { opacity: .82; } 4% { opacity: 1; }
-  31% { opacity: 1; } 32% { opacity: .87; } 33% { opacity: 1; }
-  67% { opacity: 1; } 68% { opacity: .9; } 69% { opacity: 1; }
-}
+#stars { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+.starlayer { position: absolute; top: 0; left: 0; background: transparent;
+  animation: twinkle 4s infinite alternate ease-in-out; }
+@keyframes twinkle { from { opacity: .2; } to { opacity: .85; } }
+/* C64 tape-loader colour bars */
+.loadbars { height: 6px; background: repeating-linear-gradient(180deg,
+  #6ec2e8 0 2px, #ffb000 2px 4px, #d33f49 4px 6px, #2a3b8f 6px 8px);
+  background-size: 100% 8px; animation: bars .5s steps(4) infinite; }
+@keyframes bars { to { background-position-y: 8px; } }
+#termline { padding: 5px 24px 6px; color: var(--amber); font-size: 19px;
+  background: rgba(0,0,0,.35); border-bottom: 1px solid var(--line);
+  white-space: nowrap; overflow: hidden;
+  text-shadow: 0 0 8px rgba(255,176,0,.4); }
+#termline .cur { animation: blink 1.1s steps(1) infinite; }
+/* pixel alien flyby */
+#sprite { position: fixed; bottom: 13vh; left: 0; z-index: 0;
+  pointer-events: none; animation: flyby 34s linear infinite; opacity: .5; }
+@keyframes flyby {
+  0% { transform: translateX(-60px); }
+  100% { transform: translateX(110vw); } }
+.alien { width: 4px; height: 4px; background: transparent;
+  animation: bob
+ .6s steps(2) infinite; box-shadow:
+  8px 0 var(--amber), 32px 0 var(--amber),
+  12px 4px var(--amber), 28px 4px var(--amber),
+  8px 8px var(--amber), 12px 8px var(--amber), 16px 8px var(--amber),
+  20px 8px var(--amber), 24px 8px var(--amber), 28px 8px var(--amber),
+  32px 8px var(--amber),
+  4px 12px var(--amber), 8px 12px var(--amber), 16px 12px var(--amber),
+  20px 12px var(--amber), 24px 12px var(--amber), 32px 12px var(--amber),
+  36px 12px var(--amber),
+  0 16px var(--amber), 4px 16px var(--amber), 8px 16px var(--amber),
+  12px 16px var(--amber), 16px 16px var(--amber), 20px 16px var(--amber),
+  24px 16px var(--amber), 28px 16px var(--amber), 32px 16px var(--amber),
+  36px 16px var(--amber), 40px 16px var(--amber),
+  0 20px var(--amber), 8px 20px var(--amber), 32px 20px var(--amber),
+  40px 20px var(--amber),
+  0 24px var(--amber), 40px 24px var(--amber),
+  12px 28px var(--amber), 28px 28px var(--amber); }
+@keyframes bob { 0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); } }
 /* ---- boot + loading overlays ---- */
 #boot { position: fixed; inset: 0; z-index: 200; background: #060503;
   padding: 46px; transition: opacity .45s; }
@@ -1127,7 +1161,10 @@ main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
 .row { display: flex; align-items: center; gap: 18px; padding: 12px 14px;
   border-radius: 6px; cursor: pointer; position: relative;
   background: var(--panel); border: 1px solid var(--line); margin-bottom: 10px;
-  transition: box-shadow .15s, border-color .15s, transform .15s; }
+  transition: box-shadow .15s, border-color .15s, transform .15s;
+  animation: rowin .3s ease-out both; }
+@keyframes rowin { from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; } }
 .row:hover { border-color: var(--amber);
   box-shadow: 0 0 18px rgba(255,176,0,.28), inset 0 0 24px rgba(255,176,0,.05);
   transform: translateX(5px); }
@@ -1217,6 +1254,8 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 </head>
 <body>
 <div id="gridfloor"></div>
+<div id="stars"></div>
+<div id="sprite"><div class="alien"></div></div>
 <header>
   <div class="bar">
     <div class="logo" onclick="setTab('games')">RETRO<b>SHELF</b><span class="cur">▮</span></div>
@@ -1233,6 +1272,8 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
     <button id="tab-systems" onclick="setTab('systems')">SYSTEMS</button>
     <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
   </div>
+  <div class="loadbars"></div>
+  <div id="termline">&gt; <span id="termtext"></span><span class="cur">▮</span></div>
   <div class="chips" id="chips"></div>
 </header>
 <main id="content"></main>
@@ -1241,9 +1282,11 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
   <span class="kb">Y</span> rescan <span class="kb">B</span> top</div>
 <div id="snack"></div>
 <div id="loader"><div class="inner">
+  <div class="loadbars" style="margin-bottom:26px"></div>
   <div class="t1">NOW LOADING</div>
   <div class="t2" id="loadname"></div>
   <div class="barwrap"><div class="bar"></div></div>
+  <div class="loadbars" style="margin-top:26px"></div>
 </div></div>
 <div id="crt"></div>
 <div id="boot"><pre id="boottext"></pre></div>
@@ -1288,6 +1331,40 @@ function sysLogo(id, size) {
   return `<span class="slogo" style="width:${size}px;height:${size}px">${ICONS[m[2]](m[0])}</span>`;
 }
 
+/* drifting pixel starfield */
+(function stars() {
+  const host = document.getElementById('stars');
+  const mk = (n, size, dur, color) => {
+    const d = document.createElement('div');
+    d.className = 'starlayer';
+    const sh = [];
+    for (let i = 0; i < n; i++)
+      sh.push((Math.random() * 100).toFixed(1) + 'vw ' +
+              (Math.random() * 100).toFixed(1) + 'vh 0 ' + color);
+    d.style.boxShadow = sh.join(',');
+    d.style.width = d.style.height = size + 'px';
+    d.style.animationDuration = dur + 's';
+    d.style.animationDelay = (-Math.random() * dur) + 's';
+    host.appendChild(d);
+  };
+  mk(55, 2, 4.6, 'rgba(232,217,176,.55)');
+  mk(28, 3, 3.2, 'rgba(255,176,0,.5)');
+})();
+
+/* typing terminal line */
+let _termT = null;
+function typeTerm(text) {
+  const el = document.getElementById('termtext');
+  clearInterval(_termT);
+  let i = 0;
+  _termT = setInterval(() => {
+    i += 2;
+    el.textContent = text.slice(0, i);
+    if (i >= text.length) clearInterval(_termT);
+  }, 14);
+}
+let _termInit = false;
+
 /* boot sequence */
 const BOOT = 'RETROSHELF BIOS v4.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING GAME LIBRARY ...\n\nREADY.';
 (function boot() {
@@ -1307,8 +1384,14 @@ const BOOT = 'RETROSHELF BIOS v4.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK
 })();
 
 async function refresh(rescan) {
+  if (rescan) typeTerm('LOAD "*",8,1  SEARCHING FOR GAMES...');
   state = await (await fetch('/api/state' + (rescan ? '?rescan=1' : ''))).json();
   render();
+  if (!_termInit || rescan) {
+    _termInit = true;
+    typeTerm('LOAD "*",8,1  SEARCHING... ' + allGames().length
+             + ' GAMES FOUND. READY.');
+  }
 }
 
 function setTab(t) {
@@ -1316,6 +1399,14 @@ function setTab(t) {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('on'));
   document.getElementById('tab-' + t).classList.add('on');
   render();
+  if (!state) return;
+  if (t === 'games')
+    typeTerm('LOAD "GAMES",8,1: ' + allGames().length + ' FOUND. READY.');
+  else if (t === 'systems')
+    typeTerm('SYS 49152: ' + state.systems.filter(s => s.emu_found).length
+             + ' OF ' + state.systems.length + ' EMULATORS READY.');
+  else
+    typeTerm('OPEN 15,8,15,"CONFIG": READY.');
 }
 
 function esc(s) {
@@ -1341,6 +1432,7 @@ function showLoader(name) {
 function hideLoader() { document.getElementById('loader').style.display = 'none'; }
 
 async function launch(sysId, rom, name) {
+  typeTerm('RUN "' + name.toUpperCase() + '"');
   showLoader(name);
   const r = await (await fetch('/api/launch', {method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -1426,7 +1518,7 @@ function render() {
     }
     const total = games.length;
     games = games.slice(0, shown);
-    content.innerHTML = games.map(g => {
+    content.innerHTML = games.map((g, gi) => {
       const cover = g.art
         ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
         : `<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
@@ -1437,7 +1529,7 @@ function render() {
         : `<span class="ph2">NO SCREENSHOT</span>`;
       const sub = [g.sysName, g.plays ? g.plays + (g.plays === 1 ? ' play' : ' plays') : null,
                    ago(g.last) || null].filter(Boolean).join(' · ');
-      return `<div class="row" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
+      return `<div class="row" style="animation-delay:${Math.min(gi, 16) * 28}ms" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
         <div class="cover"${coverBg}>${cover}</div>
         <div class="shot">${shot}</div>
         <div class="info"><div class="nm">${esc(g.name)}</div>
