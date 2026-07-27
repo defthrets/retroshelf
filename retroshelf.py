@@ -2330,7 +2330,8 @@ header { flex-shrink: 0; background: rgba(8,6,14,.94); border-bottom: 1px solid 
   overflow: hidden; }
 .tile.sel .cap { color: var(--amber2); }
 .tile .sub { font-size: 15px; color: var(--muted); }
-.tile .sub .tstar { color: var(--amber); letter-spacing: -1px; }
+.tile .sub .tstar { letter-spacing: -1px; text-shadow: 0 0 7px currentColor; }
+.tile .sub .tstar .temp { color: #2e2838; text-shadow: none; }
 /* list */
 .row { display: flex; align-items: center; gap: 16px; padding: 9px 12px;
   border-radius: 6px; cursor: pointer; background: var(--panel);
@@ -2599,6 +2600,10 @@ const ICONS = {
   arc:  c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M5 2h14v7l-2 3v10H7V12L5 9z"/><rect x="8" y="4.5" width="8" height="4" fill="rgba(0,0,0,.45)"/><circle cx="10" cy="16" r="1.2" fill="rgba(0,0,0,.45)"/><rect x="13" y="15.2" width="4" height="1.6" fill="rgba(0,0,0,.45)"/></svg>`,
   comp: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M3 8h18v7l1.5 5H1.5L3 15z"/><rect x="4.5" y="16.5" width="15" height="1.8" fill="rgba(0,0,0,.45)"/><rect x="5" y="9.8" width="14" height="3.4" fill="rgba(0,0,0,.3)"/></svg>`
 };
+/* rating colours run red -> green so a score reads at a glance */
+const RATING_COLORS = {1:'#ff3b30', 2:'#ff8c1a', 3:'#ffd426', 4:'#9ede0a', 5:'#00ff88'};
+function ratingColor(n){ return RATING_COLORS[n] || 'var(--muted)'; }
+
 function sysColor(id){ return (META[id]||['#9a8a5c'])[0]; }
 function sysLabel(id){ return (META[id]||[0,id.toUpperCase()])[1]; }
 function sysLogo(id,size){ const m=META[id]; if(!m) return '';
@@ -2778,8 +2783,10 @@ function render(){
         <div class="box"${bg}>${art}${g.fav?'<span class="fav">★</span>':''}
           ${g.copies>1?`<span class="copies">${g.copies}</span>`:''}</div>
         <div class="cap">${esc(g.name)}</div>
-        <div class="sub">${esc(sysLabel(g.sysId))}${g.rating?' · <span class="tstar">'
-          +'★'.repeat(g.rating)+'</span>':''}${g.plays?' · '+g.plays+'▶':''}</div></div>`;
+        <div class="sub">${esc(sysLabel(g.sysId))}${g.rating
+          ?` · <span class="tstar" style="color:${ratingColor(g.rating)}">`
+            +'★'.repeat(g.rating)+'<span class="temp">'+'★'.repeat(5-g.rating)
+            +'</span></span>':''}${g.plays?' · '+g.plays+'▶':''}</div></div>`;
     }).join('')+'</div>'+moreBtn(total);
   } else {
     host.innerHTML=list.map((g,i)=>{
@@ -2791,12 +2798,15 @@ function render(){
       const sub=[g.sysName,g.copies>1?g.copies+' versions':null,
         g.plays?g.plays+(g.plays===1?' play':' plays'):null,
         g.last?'played '+ago(g.last):null].filter(Boolean).join(' · ');
+      const rstars=g.rating
+        ? `<span class="tstar" style="color:${ratingColor(g.rating)};margin-right:8px">`
+          +'★'.repeat(g.rating)+'</span>' : '';
       return `<div class="row${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
         onclick="pick(${i})" ondblclick="playIdx(${i})">
         <div class="cover"${bg}>${art}</div>
         <div class="shot">${shot}</div>
         <div class="info"><div class="nm">${g.fav?'★ ':''}${esc(g.name)}</div>
-          <div class="sub">${sysLogo(g.sysId,14)}${esc(sub)}</div></div></div>`;
+          <div class="sub">${rstars}${sysLogo(g.sysId,14)}${esc(sub)}</div></div></div>`;
     }).join('')+moreBtn(total);
   }
   renderDetails();
@@ -2875,10 +2885,12 @@ function renderDetails(){
        ${esc(g.name.slice(0,2).toUpperCase())}</div>`;
   const shot=g.shot?`<img class="dshot" src="${shotUrl(g)}">`
     :`<div class="dshot-ph">no screenshot yet</div>`;
+  const rc=ratingColor(g.rating);
   let stars='';
   for(let i=1;i<=5;i++)
-    stars+=(i<=(g.rating||0)?`<b onclick="setRating(${i})">★</b>`
-                            :`<span onclick="setRating(${i})">☆</span>`);
+    stars+=(i<=(g.rating||0)
+      ? `<b style="color:${rc};text-shadow:0 0 9px ${rc}88" onclick="setRating(${i})">★</b>`
+      : `<span onclick="setRating(${i})">☆</span>`);
   const rsrc=g.rating?(g.rsrc==='db'?' <span class="rsrc">from database</span>'
     :' <span class="rsrc">your rating</span>'):'';
   el.innerHTML=`${cover}<div class="dbody">
@@ -2899,7 +2911,9 @@ function renderDetails(){
       ${metaRows(d)}
       <tr><td>Play count</td><td>${g.plays||0}</td></tr>
       <tr><td>Last played</td><td>${g.last?esc(ago(g.last)):'never'}</td></tr>
-      <tr><td>Rating</td><td>${g.rating?g.rating+' / 5'+(g.rsrc==='db'?' (database)':' (yours)'):'not rated'}</td></tr>
+      <tr><td>Rating</td><td>${g.rating
+        ?`<span style="color:${rc}">${g.rating} / 5</span>`+(g.rsrc==='db'?' (database)':' (yours)')
+        :'not rated'}</td></tr>
       <tr><td>File</td><td>${esc(d.file||'')}</td></tr>
       <tr><td>Size</td><td>${fmtSize(d.size)}</td></tr>
       <tr><td>Folder</td><td>${esc(d.folder||'')}</td></tr>
