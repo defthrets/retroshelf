@@ -646,6 +646,22 @@ def _amiga_dirs(cfg):
     return base / "whdboot", base / "kickstarts", base / "cache"
 
 
+def _unpack_kickstart_zips(ksdir):
+    """Allow dropping downloaded .zip files straight into the kickstarts
+    folder: recognised roms inside are extracted next to them."""
+    for z in sorted(ksdir.glob("*.zip")):
+        try:
+            with zipfile.ZipFile(z) as zf:
+                for m in zf.infolist():
+                    if m.is_dir() or m.file_size > 4 * 1024 * 1024:
+                        continue
+                    name = KICK_CRCS.get(m.CRC & 0xFFFFFFFF)
+                    if name and not (ksdir / (name + ".rom")).exists():
+                        (ksdir / (name + ".rom")).write_bytes(zf.read(m))
+        except (OSError, zipfile.BadZipFile):
+            continue
+
+
 def _sync_kickstarts(cfg):
     """Identify roms in the kickstarts folder, stage them for WHDLoad.
     Returns (found: name->path, best: Path|None)."""
@@ -655,8 +671,10 @@ def _sync_kickstarts(cfg):
     found, best = {}, None
     if not ksdir.is_dir():
         return found, best
+    _unpack_kickstart_zips(ksdir)
     for p in sorted(ksdir.iterdir()):
-        if not p.is_file() or p.stat().st_size > 4 * 1024 * 1024:
+        if (not p.is_file() or p.suffix.lower() == ".zip"
+                or p.stat().st_size > 4 * 1024 * 1024):
             continue
         data = p.read_bytes()
         if data[:11] == b"AMIROMTYPE1":
