@@ -1,5 +1,6 @@
-"""Generate the RetroShelf icon (.ico + favicon PNG) — pixel-art amber
-cartridge on a dark CRT tile. Build-time helper, needs Pillow."""
+"""Generate the RetroShelf icon (.ico + favicon PNG) — an 8-bit game
+controller in orange with red and green buttons. Build-time helper, needs
+Pillow."""
 
 import base64
 from pathlib import Path
@@ -8,37 +9,36 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 
-# 16x16 pixel design. Legend:
-#   . transparent   b background tile   B tile edge highlight
-#   a amber cart    d dark label window A light amber top edge
-#   g green power-led pixel
+# 16x16 pixel design of a game controller. Legend:
+#   . transparent      o dark outline       a orange body
+#   A light top edge   d d-pad              r red button   g green button
 DESIGN = [
-    ".bbbbbbbbbbbbbb.",
-    "bbbbbbbbbbbbbbbb",
-    "bbAAAAAAAAAAAAbb",
-    "bbaaaaaaaaaaaabb",
-    "bbaaddddddddaabb",
-    "bbaaddddddddaabb",
-    "bbaaddddddddaabb",
-    "bbaaaaaaaaaaaabb",
-    "bbaaaaaaaaaaaabb",
-    "bbaaaaaaaaaaaabb",
-    "bbbaaaaaaaaaabbb",
-    "bbbaabbbbbbaabbb",
-    "bbbaabbbbbbaabbb",
-    "bbbbbbbbbbbbgbbb",
-    "bbbbbbbbbbbbbbbb",
-    ".bbbbbbbbbbbbbb.",
+    "................",
+    "................",
+    "................",
+    "..oooooooooooo..",
+    ".oAAAAAAAAAAAAo.",
+    "oaaaaaaaaaaaaaao",
+    "oaadaaaaaaaaaaao",
+    "oadddaaaaaaragao",
+    "oaadaaaaaaaaaaao",
+    "oaaaaaaaaaaaaaao",
+    ".oaaaaaaaaaaaao.",
+    "..oooooooooooo..",
+    "................",
+    "................",
+    "................",
+    "................",
 ]
 
 COLORS = {
     ".": (0, 0, 0, 0),
-    "b": (5, 4, 10, 255),        # near-black tile
-    "B": (26, 20, 40, 255),
-    "A": (255, 178, 102, 255),   # light orange edge
-    "a": (255, 122, 24, 255),    # orange cart body
-    "d": (58, 24, 6, 255),       # dark label window
-    "g": (0, 255, 136, 255),     # green power LED
+    "o": (18, 12, 26, 255),      # dark outline
+    "A": (255, 190, 120, 255),   # light top edge
+    "a": (255, 122, 24, 255),    # orange body
+    "d": (40, 22, 12, 255),      # d-pad
+    "r": (255, 47, 74, 255),     # red button
+    "g": (0, 255, 136, 255),     # green button
 }
 
 
@@ -47,12 +47,12 @@ def base16():
     for y, row in enumerate(DESIGN):
         for x, ch in enumerate(row):
             img.putpixel((x, y), COLORS[ch])
-    # faint scanlines over the cart body
-    for y in range(2, 13, 2):
+    # shade the lower half of the body so it reads as a moulded shell
+    for y in range(9, 11):
         for x in range(16):
             r, g, b, a = img.getpixel((x, y))
-            if a and (r, g, b) != COLORS["b"][:3]:
-                img.putpixel((x, y), (int(r * .85), int(g * .85), int(b * .85), a))
+            if a and (r, g, b) == COLORS["a"][:3]:
+                img.putpixel((x, y), (int(r * .82), int(g * .82), int(b * .82), a))
     return img
 
 

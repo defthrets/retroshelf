@@ -2139,7 +2139,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <title>RetroShelf</title>
-<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAzklEQVR4nGNkgAJWFq7/DHQEv/98YwTRTAwDDBjp7XN0wMQwwIAFXeDyZB+aWqibu2WQh4D640N0dQATw2ALgZtv/6DwI9d+pMiC5cH8QywE1IVRhThZwAUW2QDdvKGXBr7/oaygRDdv8IeAOlqcnUsTpqkDmBgGexqgNWBiGOxpYNiHACOuFtHlZC6qWqQ799vgDAEWXBLoaYGt6xNJBv8q4yNKHRPDYA2BmxSWB8TqZ2IY7v2C37/rwDQra9MIDQFCgIlhgAEjjDFie8cAyJEzbA5LhBYAAAAASUVORK5CYII=">
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAp0lEQVR4nGNgGAWjYKQDRnQBIR6p/7S08N2XZyh2MjEMMGBE9/nbTXE0tVDYbxFKSDAxDDBghPs87x9dLRaeBPE7E8MAAyZcEppzvoDxgDmAXoAFXQDd1zD+9RQe0kzeagShvc+BKcbWAjD9v3rC4AoBRly5gGyfD7VcwAJjXHr1G0VipR87VnHqAfZBWhfsj/hJUwsdV7APsrqAYaS3B0bBKBgFowAA02A1L+RzQp0AAAAASUVORK5CYII=">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
