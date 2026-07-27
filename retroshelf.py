@@ -865,6 +865,54 @@ def _shots_worker(cfg):
                         found += 1
                     if done % 10 == 0:
                         _set_shots(done=done, found=found)
+
+        # second pass: fill remaining gaps from the LaunchBox image CDN
+        _set_shots(status="fetching", sys="LaunchBox images")
+        games = get_games(cfg, force=True)
+        for sysid, lst in games.items():
+            if sysid not in LB_PLATFORM:
+                continue
+            gaps = [(g, kind) for g in lst
+                    for kind in ("box", "shot")
+                    if not g["art" if kind == "box" else "shot"]]
+            if not gaps:
+                continue
+            _set_shots(sys=SYSTEMS_BY_ID[sysid]["name"] + " (LaunchBox)")
+
+            def lb_task(item):
+                g, kind = item
+                rec = meta_lookup(sysid, g["name"])
+                if not rec or not rec.get(kind):
+                    return False
+                dest = Path(cfg["art_root"]) / sysid
+                if kind == "shot":
+                    dest = dest / "screens"
+                dest.mkdir(parents=True, exist_ok=True)
+                target = dest / (Path(g["file"]).stem
+                                 + Path(rec[kind]).suffix.lower())
+                if target.exists():
+                    return False
+                try:
+                    req = urllib.request.Request(
+                        LB_IMG_BASE + urllib.parse.quote(rec[kind]),
+                        headers={"User-Agent": "RetroShelf"})
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        data = r.read()
+                    if data[:4] == b"\x89PNG" or data[:2] == b"\xff\xd8":
+                        target.write_bytes(data)
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                for ok in ex.map(lb_task, gaps):
+                    done += 1
+                    if ok:
+                        found += 1
+                    if done % 10 == 0:
+                        _set_shots(done=done, found=found)
+
         _scan_cache["time"] = 0
         _set_shots(status="done", done=done, found=found, sys="")
     except Exception as e:
@@ -881,6 +929,7 @@ def start_shots(cfg):
 # --- game descriptions (LaunchBox Games Database dump) -----------------------
 
 LB_META_URL = "https://gamesdb.launchbox-app.com/Metadata.zip"
+LB_IMG_BASE = "https://images.launchbox-app.com/"
 LB_PLATFORM = {
     "nes": "Nintendo Entertainment System",
     "snes": "Super Nintendo Entertainment System",
@@ -946,8 +995,27 @@ def _meta_worker():
         out = {s: {} for s in LB_PLATFORM}
         import xml.etree.ElementTree as ET
         kept = 0
+        by_id = {}          # database id -> (sysid, key)
+        images = {}         # database id -> {"box": file, "shot": file}
+        IMG_WANT = {"Box - Front": "box", "Screenshot - Gameplay": "shot"}
         with zipfile.ZipFile(zpath) as z, z.open("Metadata.xml") as f:
             for _ev, el in ET.iterparse(f, events=("end",)):
+                if el.tag == "GameImage":
+                    kind = IMG_WANT.get(el.findtext("Type") or "")
+                    if kind:
+                        dbid = el.findtext("DatabaseID") or ""
+                        fname = el.findtext("FileName") or ""
+                        if dbid and fname:
+                            slot = images.setdefault(dbid, {})
+                            region = (el.findtext("Region") or "").lower()
+                            # first one wins, but a US image beats a non-US one
+                            if kind not in slot or ("united states" in region
+                                                    and not slot.get(kind + "_us")):
+                                slot[kind] = fname
+                                if "united states" in region:
+                                    slot[kind + "_us"] = True
+                    el.clear()
+                    continue
                 if el.tag != "Game":
                     continue
                 sysid = wanted.get((el.findtext("Platform") or "").lower())
@@ -966,12 +1034,27 @@ def _meta_worker():
                             "rt": el.findtext("CommunityRating") or "",
                             "esrb": el.findtext("ESRB") or "",
                         }
-                        if any(rec.values()):
+                        dbid = el.findtext("DatabaseID") or ""
+                        if any(rec.values()) or dbid:
                             out[sysid][key] = rec
+                            if dbid:
+                                by_id[dbid] = (sysid, key)
                             kept += 1
                             if kept % 2000 == 0:
                                 _set_meta(games=kept)
                 el.clear()
+        # attach image filenames to their game records
+        for dbid, (sysid, key) in by_id.items():
+            imgs = images.get(dbid)
+            if not imgs:
+                continue
+            rec = out[sysid].get(key)
+            if rec is None:
+                continue
+            if imgs.get("box"):
+                rec["box"] = imgs["box"]
+            if imgs.get("shot"):
+                rec["shot"] = imgs["shot"]
         for sysid, d in out.items():
             if d:
                 (_meta_dir() / (sysid + ".json")).write_text(
@@ -1434,6 +1517,63 @@ def find_dupes(cfg):
     return out
 
 
+REGION_WORDS = [("usa", "USA"), ("(us)", "USA"), ("world", "World"),
+                ("europe", "Europe"), ("(eu)", "Europe"), ("japan", "Japan"),
+                ("korea", "Korea"), ("germany", "Germany"), ("france", "France"),
+                ("italy", "Italy"), ("spain", "Spain"), ("australia", "Australia"),
+                ("canada", "Canada"), ("brazil", "Brazil")]
+FLAG_WORDS = [("demo", "Demo"), ("beta", "Beta"), ("proto", "Proto"),
+              ("sample", "Sample"), ("aga", "AGA"), ("cd32", "CD32"),
+              ("ntsc", "NTSC"), ("pal", "PAL"), ("rev ", "Rev"),
+              ("not for resale", "NFR"), ("(u)", "USA"), ("(e)", "Europe"),
+              ("(j)", "Japan")]
+DISCNUM_RE = re.compile(r"\(\s*(?:disc|disk|cd)\s*(\d+)", re.I)
+
+
+def version_label(fname):
+    """Short human label for a game file: region, disc and variant flags."""
+    low = fname.lower()
+    bits = []
+    for key, label in REGION_WORDS:
+        if key in low:
+            bits.append(label)
+            break
+    d = DISCNUM_RE.search(fname)
+    if d:
+        bits.append("Disc " + d.group(1))
+    for key, label in FLAG_WORDS:
+        if key in low and label not in bits:
+            bits.append(label)
+    ver = re.search(r"_v(\d[\w.]*)", fname)
+    if ver:
+        bits.append("v" + ver.group(1).rstrip("_"))
+    if not bits:
+        bits.append(Path(fname).suffix.lstrip(".").upper() or "File")
+    return " · ".join(bits[:4])
+
+
+def list_versions(cfg, sysid, name):
+    """Every file in this system that is the same title, for the picker."""
+    games = get_games(cfg).get(sysid, [])
+    key = norm_title(name)
+    out = []
+    for g in games:
+        if norm_title(g["name"]) != key:
+            continue
+        p = Path(g["file"])
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        out.append({"file": str(p), "name": p.name, "size": size,
+                    "label": version_label(p.name),
+                    "disc": int(DISCNUM_RE.search(p.name).group(1))
+                            if DISCNUM_RE.search(p.name) else 0,
+                    "rank": _region_rank(p.name)})
+    out.sort(key=lambda v: (v["disc"], v["rank"], -v["size"]))
+    return out
+
+
 def quarantine(cfg, paths):
     root = Path(cfg["library_root"])
     dest_root = Path(cfg["emulators_root"]).parent / "quarantine"
@@ -1646,6 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
             name = qs.get("name", [""])[0]
             if sysid and name:
                 info["meta"] = meta_lookup(sysid, name)
+                info["versions"] = list_versions(load_config(), sysid, name)
             self._json(info)
         elif parsed.path == "/api/art":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1988,6 +2129,17 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
 .dshot-ph { width: 100%; aspect-ratio: 4/3; border-radius: 4px;
   border: 1px dashed var(--line); display: flex; align-items: center;
   justify-content: center; color: var(--muted); font-size: 16px; margin-bottom: 14px; }
+.verwrap { border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px;
+  margin: 12px 0 4px; background: rgba(0,0,0,.25); }
+.verlabel { font-size: 15px; color: var(--dim); letter-spacing: 1px;
+  margin-bottom: 5px; }
+.ver { display: flex; align-items: center; gap: 8px; padding: 3px 4px;
+  cursor: pointer; border-radius: 3px; font-size: 17px; color: var(--text); }
+.ver:hover { background: rgba(255,176,0,.08); }
+.ver.on { color: var(--amber2); text-shadow: 0 0 8px rgba(255,176,0,.4); }
+.ver .vr { color: var(--amber); width: 12px; }
+.ver .vl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ver .vs { color: var(--muted); font-size: 16px; }
 .overview { font-size: 18px; color: var(--text); line-height: 1.45; margin-bottom: 12px;
   white-space: pre-wrap; }
 .overview.clip { display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical;
@@ -2149,6 +2301,7 @@ let sortMode = localStorage.getItem('rs_sort') || 'name';
 let shown = 300;
 let curGame = null;
 let curList = [];
+let curVersion = null;
 
 const META = {
   nes:['#e60012','NES','cart'], snes:['#7b5aa6','SNES','cart'],
@@ -2399,6 +2552,7 @@ function pickSys(id){ sel=id; shown=300; render();
 function pick(i){
   curGame=curList[i]||null;
   _ovOpen=false;
+  curVersion=curGame?curGame.file:null;
   markSel();
   renderDetails();
   loadDetails();
@@ -2410,7 +2564,10 @@ function markSel(){
   });
 }
 function playIdx(i){ const g=curList[i]; if(g) launch(g.sysId,g.file,g.name); }
-function playCur(){ if(curGame) launch(curGame.sysId,curGame.file,curGame.name); }
+function playCur(){
+  if(!curGame) return;
+  launch(curGame.sysId, curVersion || curGame.file, curGame.name);
+}
 
 let _det={};
 let _ovOpen=false;
@@ -2443,6 +2600,7 @@ function renderDetails(){
   el.innerHTML=`${cover}<div class="dbody">
     <div class="dtitle">${esc(g.name)}</div>
     <div class="dsys">${sysLogo(g.sysId,15)}${esc(g.sysName||'')}</div>
+    ${versionHtml(d)}
     <button class="playbig" onclick="playCur()">▶ PLAY</button>
     <div class="drow2">
       <button onclick="toggleFav()">${g.fav?'★ FAVOURITE':'☆ FAVOURITE'}</button>
@@ -2462,6 +2620,23 @@ function renderDetails(){
       <tr><td>Size</td><td>${fmtSize(d.size)}</td></tr>
       <tr><td>Folder</td><td>${esc(d.folder||'')}</td></tr>
     </table></div>`;
+}
+
+function versionHtml(d){
+  const vs=d.versions||[];
+  if(vs.length<2) return '';
+  const cur=curVersion||(curGame?curGame.file:'');
+  return `<div class="verwrap"><div class="verlabel">VERSION &mdash; ${vs.length} copies of this game</div>`+
+    vs.map(v=>`<div class="ver${v.file===cur?' on':''}" onclick="pickVersion(${JSON.stringify(v.file).replace(/"/g,'&quot;')})">
+      <span class="vr">${v.file===cur?'●':'○'}</span>
+      <span class="vl">${esc(v.label)}</span>
+      <span class="vs">${fmtSize(v.size)}</span></div>`).join('')+'</div>';
+}
+function pickVersion(f){
+  curVersion=f;
+  renderDetails();
+  const v=((_det[curGame.file]||{}).versions||[]).find(x=>x.file===f);
+  if(v) snack('VERSION: '+v.label);
 }
 
 function overviewHtml(d){
