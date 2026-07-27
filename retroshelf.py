@@ -418,9 +418,14 @@ def scan_all(cfg):
             sysid = classify(rel_parts, ext, p)
             if not sysid:
                 continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
             games[sysid].append({
                 "name": clean_name(stem),
                 "file": str(p),
+                "size": size,
                 "art": has_art(sysid, dp, stem, "cover"),
                 "shot": has_art(sysid, dp, stem, "screen"),
             })
@@ -1115,6 +1120,64 @@ def meta_have():
     return sorted(p.stem for p in _meta_dir().glob("*.json"))
 
 
+# --- import community ratings into the star field ---------------------------
+
+RATINGS = {}
+_rate_lock = threading.Lock()
+
+
+def _set_rate(**kw):
+    with _rate_lock:
+        RATINGS.update(kw)
+
+
+def _ratings_worker(cfg, overwrite):
+    try:
+        _set_rate(status="working", done=0, total=0, set=0, msg="")
+        games = get_games(cfg)
+        todo = [(s, g) for s, lst in games.items() if s in LB_PLATFORM
+                for g in lst]
+        _set_rate(total=len(todo))
+        n = 0
+        for i, (sysid, g) in enumerate(todo):
+            if i % 50 == 0:
+                _set_rate(done=i, set=n)
+            st = cfg["stats"].get(g["file"], {})
+            # never clobber a rating the user set by hand
+            if st.get("rating") and st.get("rsrc") != "db" and not overwrite:
+                continue
+            rec = meta_lookup(sysid, g["name"])
+            if not rec or not rec.get("rt"):
+                continue
+            try:
+                val = max(1, min(5, int(round(float(rec["rt"])))))
+            except (TypeError, ValueError):
+                continue
+            if st.get("rating") == val and st.get("rsrc") == "db":
+                continue
+            st = cfg["stats"].setdefault(g["file"], {})
+            st["rating"] = val
+            st["rsrc"] = "db"
+            n += 1
+        with _lock:
+            cur = load_config()
+            cur["stats"].update(cfg["stats"])
+            save_config(cur)
+        _set_rate(status="done", done=len(todo), set=n)
+    except Exception as e:
+        _set_rate(status="error", msg=str(e))
+
+
+def start_ratings(cfg, overwrite=False):
+    if RATINGS.get("status") == "working":
+        return True, "already running"
+    if not meta_have():
+        return False, "download the game database first"
+    threading.Thread(target=_ratings_worker, args=(cfg, overwrite),
+                     daemon=True).start()
+    return True, "importing ratings"
+
+
 # --- Amiga WHDLoad launching -------------------------------------------------
 # The user's Amiga games are WHDLoad installs packed as .rar/.lha. WinUAE can't
 # boot those directly, so on launch we extract the archive, build a minimal
@@ -1344,6 +1407,52 @@ def _amiga_launch(cfg, rom_path, emu):
 
 # --- state / launch ---------------------------------------------------------
 
+def collapse_versions(gl):
+    """One library entry per title. The copy shown (and launched by default)
+    is disc 1 if it is a multi-disc set, otherwise the largest file."""
+    groups, order = {}, []
+    for g in gl:
+        key = norm_title(g["name"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(g)
+
+    def rank(g):
+        name = Path(g["file"]).name
+        m = DISCNUM_RE.search(name)
+        low = name.lower()
+        # start at disc 1, skip demos/betas when a full release exists,
+        # then prefer the biggest file
+        partial = any(w in low for w in
+                      ("demo", "beta", "proto", "sample", "not for resale"))
+        return (int(m.group(1)) if m else 0, partial, -g.get("size", 0))
+
+    out = []
+    for key in order:
+        items = sorted(groups[key], key=rank)
+        best = dict(items[0])
+        best["copies"] = len(items)
+        if len(items) > 1:
+            # art may sit on any of the copies; play counts belong to the title
+            withart = next((g for g in items if g["art"]), None)
+            withshot = next((g for g in items if g["shot"]), None)
+            best["art"] = bool(withart)
+            best["shot"] = bool(withshot)
+            best["artref"] = (withart or best)["file"]
+            best["shotref"] = (withshot or best)["file"]
+            best["plays"] = sum(g.get("plays", 0) for g in items)
+            best["last"] = max(g.get("last", 0) for g in items)
+            best["fav"] = any(g.get("fav") for g in items)
+            if not best.get("rating"):
+                best["rating"] = max((g.get("rating", 0) for g in items),
+                                     default=0)
+        else:
+            best["artref"] = best["shotref"] = best["file"]
+        out.append(best)
+    return out
+
+
 def build_state(cfg, rescan=False):
     games = get_games(cfg, force=rescan)
     systems = []
@@ -1355,7 +1464,9 @@ def build_state(cfg, rescan=False):
             st = cfg["stats"].get(g["file"], {})
             gl.append({**g, "plays": st.get("plays", 0), "last": st.get("last", 0),
                        "fav": st.get("fav", False),
-                       "rating": st.get("rating", 0)})
+                       "rating": st.get("rating", 0),
+                       "rsrc": st.get("rsrc", "")})
+        gl = collapse_versions(gl)
         bios_rule = BIOS_RULES.get(sysdef["id"])
         if sysdef["id"] == "amiga":
             nbios = len(list((Path(cfg["emulators_root"]) / "amiga" /
@@ -1392,6 +1503,8 @@ def build_state(cfg, rescan=False):
         shots = dict(SHOTS)
     with _meta_lock:
         meta = dict(META)
+    with _rate_lock:
+        ratings = dict(RATINGS)
     meta["have"] = meta_have()
     return {
         "meta": meta,
@@ -1404,6 +1517,7 @@ def build_state(cfg, rescan=False):
         "downloads": downloads,
         "covers": covers,
         "shots": shots,
+        "ratings": ratings,
         "systems": systems,
     }
 
@@ -1835,10 +1949,14 @@ class Handler(BaseHTTPRequestHandler):
                         st["fav"] = bool(body["fav"])
                     if "rating" in body:
                         st["rating"] = max(0, min(5, int(body["rating"] or 0)))
+                        st["rsrc"] = "user"      # hand-set ratings are protected
                     save_config(cfg)
                 self._json({"ok": True, "msg": "saved"})
             elif parsed.path == "/api/fetchshots":
                 ok, msg = start_shots(cfg)
+                self._json({"ok": ok, "msg": msg})
+            elif parsed.path == "/api/importratings":
+                ok, msg = start_ratings(cfg, bool(body.get("overwrite")))
                 self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/fetchmeta":
                 ok, msg = start_meta()
@@ -2067,11 +2185,15 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
   box-shadow: 0 0 20px rgba(255,176,0,.45); }
 .tile .fav { position: absolute; top: 5px; right: 6px; color: var(--amber);
   font-size: 20px; text-shadow: 0 0 6px rgba(0,0,0,.9); }
+.tile .copies { position: absolute; bottom: 5px; right: 5px; background: rgba(6,5,3,.85);
+  border: 1px solid var(--amber); color: var(--amber); border-radius: 3px;
+  font-size: 14px; padding: 0 6px; line-height: 1.5; }
 .tile .cap { font-size: 17px; color: var(--text); margin-top: 6px; line-height: 1.15;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden; }
 .tile.sel .cap { color: var(--amber2); }
 .tile .sub { font-size: 15px; color: var(--muted); }
+.tile .sub .tstar { color: var(--amber); letter-spacing: -1px; }
 /* list */
 .row { display: flex; align-items: center; gap: 16px; padding: 9px 12px;
   border-radius: 6px; cursor: pointer; background: var(--panel);
@@ -2124,6 +2246,8 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
   margin-bottom: 12px; }
 .stars b { color: var(--amber); font-weight: 400;
   text-shadow: 0 0 8px rgba(255,176,0,.6); }
+.stars .rsrc { font-size: 15px; color: var(--muted); letter-spacing: 0;
+  margin-left: 6px; }
 .dshot { width: 100%; border-radius: 4px; border: 1px solid var(--line);
   display: block; margin-bottom: 14px; background: #000; }
 .dshot-ph { width: 100%; aspect-ratio: 4/3; border-radius: 4px;
@@ -2403,7 +2527,7 @@ function setTab(t){
 
 function setView(v){ view=v; localStorage.setItem('rs_view',v); shown=300; render(); }
 function cycleSort(){
-  const modes=['name','recent','plays','system'];
+  const modes=['name','rating','recent','plays','system'];
   sortMode=modes[(modes.indexOf(sortMode)+1)%modes.length];
   localStorage.setItem('rs_sort',sortMode); render();
 }
@@ -2440,8 +2564,8 @@ function fmtSize(b){
   const u=['B','KB','MB','GB']; let i=0; while(b>=1024&&i<3){b/=1024;i++;}
   return b.toFixed(i?1:0)+' '+u[i];
 }
-function coverUrl(g){ return '/api/art?system='+g.sysId+'&rom='+encodeURIComponent(g.file); }
-function shotUrl(g){ return '/api/art?system='+g.sysId+'&kind=screen&rom='+encodeURIComponent(g.file); }
+function coverUrl(g){ return '/api/art?system='+g.sysId+'&rom='+encodeURIComponent(g.artref||g.file); }
+function shotUrl(g){ return '/api/art?system='+g.sysId+'&kind=screen&rom='+encodeURIComponent(g.shotref||g.file); }
 
 function currentGames(){
   let games;
@@ -2454,6 +2578,8 @@ function currentGames(){
   if(q) games=games.filter(g=>g.name.toLowerCase().includes(q));
   if(sel!=='recent'){
     if(sortMode==='name') games.sort((a,b)=>a.name.toLowerCase()<b.name.toLowerCase()?-1:1);
+    else if(sortMode==='rating') games.sort((a,b)=>(b.rating||0)-(a.rating||0)
+      || (a.name.toLowerCase()<b.name.toLowerCase()?-1:1));
     else if(sortMode==='recent') games.sort((a,b)=>(b.last||0)-(a.last||0));
     else if(sortMode==='plays') games.sort((a,b)=>(b.plays||0)-(a.plays||0));
     else if(sortMode==='system') games.sort((a,b)=>
@@ -2495,9 +2621,11 @@ function render(){
       return `<div class="tile${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
         style="animation-delay:${Math.min(i,20)*22}ms"
         onclick="pick(${i})" ondblclick="playIdx(${i})">
-        <div class="box"${bg}>${art}${g.fav?'<span class="fav">★</span>':''}</div>
+        <div class="box"${bg}>${art}${g.fav?'<span class="fav">★</span>':''}
+          ${g.copies>1?`<span class="copies">${g.copies}</span>`:''}</div>
         <div class="cap">${esc(g.name)}</div>
-        <div class="sub">${esc(sysLabel(g.sysId))}${g.plays?' · '+g.plays+'▶':''}</div></div>`;
+        <div class="sub">${esc(sysLabel(g.sysId))}${g.rating?' · <span class="tstar">'
+          +'★'.repeat(g.rating)+'</span>':''}${g.plays?' · '+g.plays+'▶':''}</div></div>`;
     }).join('')+'</div>'+moreBtn(total);
   } else {
     host.innerHTML=list.map((g,i)=>{
@@ -2506,7 +2634,8 @@ function render(){
       const bg=g.art?'':` style="background:linear-gradient(150deg,${sysColor(g.sysId)},#17130b)"`;
       const shot=g.shot?`<img loading="lazy" src="${shotUrl(g)}">`
         :`<span class="ph2">NO SHOT</span>`;
-      const sub=[g.sysName,g.plays?g.plays+(g.plays===1?' play':' plays'):null,
+      const sub=[g.sysName,g.copies>1?g.copies+' versions':null,
+        g.plays?g.plays+(g.plays===1?' play':' plays'):null,
         g.last?'played '+ago(g.last):null].filter(Boolean).join(' · ');
       return `<div class="row${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
         style="animation-delay:${Math.min(i,16)*22}ms"
@@ -2597,6 +2726,8 @@ function renderDetails(){
   for(let i=1;i<=5;i++)
     stars+=(i<=(g.rating||0)?`<b onclick="setRating(${i})">★</b>`
                             :`<span onclick="setRating(${i})">☆</span>`);
+  const rsrc=g.rating?(g.rsrc==='db'?' <span class="rsrc">from database</span>'
+    :' <span class="rsrc">your rating</span>'):'';
   el.innerHTML=`${cover}<div class="dbody">
     <div class="dtitle">${esc(g.name)}</div>
     <div class="dsys">${sysLogo(g.sysId,15)}${esc(g.sysName||'')}</div>
@@ -2606,7 +2737,7 @@ function renderDetails(){
       <button onclick="toggleFav()">${g.fav?'★ FAVOURITE':'☆ FAVOURITE'}</button>
       <button onclick="openFolder()">📁 FOLDER</button>
     </div>
-    <div class="stars">${stars}</div>
+    <div class="stars">${stars}${rsrc}</div>
     ${shot}
     ${overviewHtml(d)}
     ${genresHtml(d)}
@@ -2615,7 +2746,7 @@ function renderDetails(){
       ${metaRows(d)}
       <tr><td>Play count</td><td>${g.plays||0}</td></tr>
       <tr><td>Last played</td><td>${g.last?esc(ago(g.last)):'never'}</td></tr>
-      <tr><td>Your rating</td><td>${g.rating?g.rating+' / 5':'not rated'}</td></tr>
+      <tr><td>Rating</td><td>${g.rating?g.rating+' / 5'+(g.rsrc==='db'?' (database)':' (yours)'):'not rated'}</td></tr>
       <tr><td>File</td><td>${esc(d.file||'')}</td></tr>
       <tr><td>Size</td><td>${fmtSize(d.size)}</td></tr>
       <tr><td>Folder</td><td>${esc(d.folder||'')}</td></tr>
@@ -2626,7 +2757,7 @@ function versionHtml(d){
   const vs=d.versions||[];
   if(vs.length<2) return '';
   const cur=curVersion||(curGame?curGame.file:'');
-  return `<div class="verwrap"><div class="verlabel">VERSION &mdash; ${vs.length} copies of this game</div>`+
+  return `<div class="verwrap"><div class="verlabel">${vs.length} VERSIONS &mdash; pick one to play</div>`+
     vs.map(v=>`<div class="ver${v.file===cur?' on':''}" onclick="pickVersion(${JSON.stringify(v.file).replace(/"/g,'&quot;')})">
       <span class="vr">${v.file===cur?'●':'○'}</span>
       <span class="vl">${esc(v.label)}</span>
@@ -2856,6 +2987,14 @@ function renderPage(){
           <button class="filled" onclick="fetchMeta()">DOWNLOAD GAME DATABASE</button>
         </div></div>
       <div class="card">
+        <div class="head"><span class="nm">Star ratings</span>${ratingStatus()}</div>
+        <div class="dim">Fills every game's stars from the community rating in the
+          games database. Ratings you set yourself are never overwritten.</div>
+        <div class="fields">
+          <button class="filled" onclick="importRatings(false)">IMPORT RATINGS</button>
+          <button class="outlined" onclick="importRatings(true)">RE-IMPORT (OVERWRITE MINE)</button>
+        </div></div>
+      <div class="card">
         <div class="head"><span class="nm">Online art fetcher</span>${shotsStatus()}</div>
         <div class="dim">Downloads missing screenshots (and any missing covers) from the
           libretro thumbnail library, matched by title. Run it again any time &mdash;
@@ -2905,6 +3044,31 @@ function shotsStatus(){
   if(c.status==='error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
   return `<span class="pill ok">DONE &middot; ${c.found} IMAGES FETCHED</span>`;
 }
+function ratingStatus(){
+  const r=state.ratings||{};
+  if(r.status==='working') return `<span class="pill dlp">RATING ${r.done||0}/${r.total||0} &middot; ${r.set||0} SET</span>`;
+  if(r.status==='error') return `<span class="pill bad">ERROR: ${esc(r.msg||'')}</span>`;
+  const n=allGames().filter(g=>g.rating).length;
+  return n?`<span class="pill ok">${n} GAMES RATED</span>`:`<span class="pill bad">NONE RATED</span>`;
+}
+let _ratePoll=null;
+async function importRatings(overwrite){
+  if(overwrite && !confirm('Replace the ratings you set yourself with the database ratings?')) return;
+  const r=await (await fetch('/api/importratings',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({overwrite:!!overwrite})})).json();
+  snack(r.ok?'IMPORTING RATINGS...':'ERROR: '+r.msg);
+  if(r.ok&&!_ratePoll){
+    _ratePoll=setInterval(async()=>{
+      await refresh();
+      const st=(state.ratings||{}).status;
+      if(st!=='working'){ clearInterval(_ratePoll); _ratePoll=null;
+        snack(st==='done'?'RATINGS IMPORTED: '+state.ratings.set+' GAMES'
+          :'RATING ERROR: '+(state.ratings.msg||'')); }
+    },1500);
+  }
+}
+
 function metaStatus(){
   const m=state.meta||{};
   if(m.status==='downloading') return `<span class="pill dlp">DOWNLOADING ${m.pct||0}%</span>`;
