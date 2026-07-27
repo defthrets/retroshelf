@@ -18,6 +18,7 @@ Run:  python retroshelf.py          (opens browser)
       python retroshelf.py --no-browser
 """
 
+import concurrent.futures
 import difflib
 import json
 import mimetypes
@@ -194,7 +195,16 @@ HINTS = {
     "c64": ["c64", "commodore 64", "commodore64"],
     "amiga": ["amiga", "whdload"],
 }
-SKIP_DIRS = {"art", "covers", "screens", "screenshots", "emulators"}
+SKIP_DIRS = {"art", "covers", "screens", "screenshots", "emulators", "boxart",
+             "boxarts", "named_boxarts", "named_snaps", "named_titles",
+             "media", "thumbnails"}
+# folders that hold firmware/BIOS dumps rather than games
+SKIP_WORDS = ("firmware", "bios", "kickstart")
+
+
+def skip_dir(name):
+    n = name.lower()
+    return n in SKIP_DIRS or any(w in n for w in SKIP_WORDS)
 
 _lock = threading.Lock()
 
@@ -364,7 +374,9 @@ def scan_all(cfg):
         return False
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if not skip_dir(d)]
+        if any(skip_dir(part) for part in Path(dirpath).parts):
+            continue
         dp = Path(dirpath)
         try:
             rel_parts = dp.relative_to(root).parts
@@ -508,6 +520,10 @@ def _set_cov(**kw):
         COVERS.update(kw)
 
 
+_ROMAN = [("viii", "8"), ("vii", "7"), ("iii", "3"), ("vi", "6"),
+          ("iv", "4"), ("ix", "9"), ("ii", "2")]
+
+
 def norm_title(s):
     """Normalise a title for matching: drop tags/punctuation, split camelcase."""
     s = TAG_RE.sub("", s)
@@ -515,6 +531,8 @@ def norm_title(s):
     s = _norm_re.sub(" ", s.lower()).strip()
     if s.startswith("the "):
         s = s[4:]
+    for rom, num in _ROMAN:   # Alien Breed II <-> Alien Breed 2
+        s = re.sub(r"\b" + rom + r"\b", num, s)
     return s
 
 
@@ -595,6 +613,139 @@ def start_cover_match(cfg, covers_dir):
     threading.Thread(target=_cover_worker, args=(covers_dir, cfg),
                      daemon=True).start()
     return True, "matching started"
+
+
+# --- online art fetcher (libretro thumbnails) --------------------------------
+
+LIBRETRO_BASE = "https://thumbnails.libretro.com/"
+LIBRETRO_SYS = {
+    "nes": "Nintendo - Nintendo Entertainment System",
+    "snes": "Nintendo - Super Nintendo Entertainment System",
+    "n64": "Nintendo - Nintendo 64",
+    "gb": "Nintendo - Game Boy",
+    "gba": "Nintendo - Game Boy Advance",
+    "nds": "Nintendo - Nintendo DS",
+    "gamecube": "Nintendo - GameCube",
+    "wii": "Nintendo - Wii",
+    "genesis": "Sega - Mega Drive - Genesis",
+    "dreamcast": "Sega - Dreamcast",
+    "ps1": "Sony - PlayStation",
+    "ps2": "Sony - PlayStation 2",
+    "psp": "Sony - PlayStation Portable",
+    "arcade": "MAME",
+    "atari2600": "Atari - 2600",
+    "c64": "Commodore - 64",
+    "amiga": "Commodore - Amiga",
+}
+
+SHOTS = {}
+_shots_lock = threading.Lock()
+
+
+def _set_shots(**kw):
+    with _shots_lock:
+        SHOTS.update(kw)
+
+
+def _libretro_index(sysdir, kind):
+    """Fetch the thumbnail directory listing, keyed by normalised title."""
+    url = LIBRETRO_BASE + urllib.parse.quote(sysdir) + "/" + kind + "/"
+    req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        html = r.read().decode("utf-8", "replace")
+    exact, nospace, byletter = {}, {}, {}
+    for href in re.findall(r'href="([^"]+\.png)"', html):
+        fname = urllib.parse.unquote(href.rsplit("/", 1)[-1])
+        key = norm_title(fname[:-4])
+        if not key:
+            continue
+        if key not in exact:
+            exact[key] = fname
+            nospace.setdefault(key.replace(" ", ""), fname)
+            byletter.setdefault(key[:1], []).append(key)
+    return exact, nospace, byletter
+
+
+def _libretro_match(key, index):
+    exact, nospace, byletter = index
+    hit = exact.get(key) or nospace.get(key.replace(" ", ""))
+    if not hit:
+        close = difflib.get_close_matches(key, byletter.get(key[:1], []),
+                                          n=1, cutoff=0.87)
+        if close:
+            hit = exact[close[0]]
+    return hit
+
+
+def _shots_worker(cfg):
+    try:
+        _set_shots(status="indexing", done=0, total=0, found=0, msg="", sys="")
+        games = get_games(cfg)
+        jobs = []      # (sysid, kind, destsub, [games])
+        for sysid, lst in games.items():
+            if sysid not in LIBRETRO_SYS or not lst:
+                continue
+            mshots = [g for g in lst if not g["shot"]]
+            mcovers = [g for g in lst if not g["art"]]
+            if mshots:
+                jobs.append((sysid, "Named_Snaps", "screens", mshots))
+            if mcovers:
+                jobs.append((sysid, "Named_Boxarts", "", mcovers))
+        total = sum(len(j[3]) for j in jobs)
+        _set_shots(status="fetching", total=total)
+        done = found = 0
+        for sysid, kind, destsub, lst in jobs:
+            sysdir = LIBRETRO_SYS[sysid]
+            _set_shots(sys=SYSTEMS_BY_ID[sysid]["name"], done=done, found=found)
+            try:
+                index = _libretro_index(sysdir, kind)
+            except Exception:
+                done += len(lst)
+                continue
+            dest = Path(cfg["art_root"]) / sysid
+            if destsub:
+                dest = dest / destsub
+            dest.mkdir(parents=True, exist_ok=True)
+            base = LIBRETRO_BASE + urllib.parse.quote(sysdir) + "/" + kind + "/"
+
+            def task(g):
+                hit = _libretro_match(norm_title(g["name"]), index)
+                if not hit:
+                    return False
+                target = dest / (Path(g["file"]).stem + ".png")
+                if target.exists():
+                    return True
+                try:
+                    req = urllib.request.Request(
+                        base + urllib.parse.quote(hit),
+                        headers={"User-Agent": "RetroShelf"})
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        data = r.read()
+                    if data[:4] == b"\x89PNG":
+                        target.write_bytes(data)
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                for ok in ex.map(task, lst):
+                    done += 1
+                    if ok:
+                        found += 1
+                    if done % 10 == 0:
+                        _set_shots(done=done, found=found)
+        _scan_cache["time"] = 0
+        _set_shots(status="done", done=done, found=found, sys="")
+    except Exception as e:
+        _set_shots(status="error", msg=str(e))
+
+
+def start_shots(cfg):
+    if SHOTS.get("status") in ("indexing", "fetching"):
+        return True, "already fetching"
+    threading.Thread(target=_shots_worker, args=(cfg,), daemon=True).start()
+    return True, "fetching started"
 
 
 # --- Amiga WHDLoad launching -------------------------------------------------
@@ -835,7 +986,9 @@ def build_state(cfg, rescan=False):
         gl = []
         for g in games.get(sysdef["id"], []):
             st = cfg["stats"].get(g["file"], {})
-            gl.append({**g, "plays": st.get("plays", 0), "last": st.get("last", 0)})
+            gl.append({**g, "plays": st.get("plays", 0), "last": st.get("last", 0),
+                       "fav": st.get("fav", False),
+                       "rating": st.get("rating", 0)})
         systems.append({
             "id": sysdef["id"],
             "name": sysdef["name"],
@@ -856,6 +1009,8 @@ def build_state(cfg, rescan=False):
         downloads = {k: dict(v) for k, v in DOWNLOADS.items()}
     with _cover_lock:
         covers = dict(COVERS)
+    with _shots_lock:
+        shots = dict(SHOTS)
     return {
         "library_root": cfg["library_root"],
         "emulators_root": cfg["emulators_root"],
@@ -863,6 +1018,7 @@ def build_state(cfg, rescan=False):
         "covers_dir": cfg.get("covers_dir", ""),
         "downloads": downloads,
         "covers": covers,
+        "shots": shots,
         "systems": systems,
     }
 
@@ -943,6 +1099,18 @@ class Handler(BaseHTTPRequestHandler):
             rescan = qs.get("rescan", ["0"])[0] == "1"
             with _lock:
                 self._json(build_state(load_config(), rescan=rescan))
+        elif parsed.path == "/api/details":
+            qs = urllib.parse.parse_qs(parsed.query)
+            rom = qs.get("rom", [""])[0]
+            p = Path(rom)
+            info = {"folder": str(p.parent), "file": p.name, "size": 0, "mtime": 0}
+            try:
+                st = p.stat()
+                info["size"] = st.st_size
+                info["mtime"] = int(st.st_mtime)
+            except OSError:
+                pass
+            self._json(info)
         elif parsed.path == "/api/art":
             qs = urllib.parse.parse_qs(parsed.query)
             system_id = qs.get("system", [""])[0]
@@ -981,6 +1149,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/download":
                 ok, msg = start_download(body.get("id", ""), cfg)
+                self._json({"ok": ok, "msg": msg})
+            elif parsed.path == "/api/meta":
+                rom = body.get("rom", "")
+                if rom:
+                    st = cfg["stats"].setdefault(rom, {})
+                    if "fav" in body:
+                        st["fav"] = bool(body["fav"])
+                    if "rating" in body:
+                        st["rating"] = max(0, min(5, int(body["rating"] or 0)))
+                    save_config(cfg)
+                self._json({"ok": True, "msg": "saved"})
+            elif parsed.path == "/api/fetchshots":
+                ok, msg = start_shots(cfg)
                 self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/matchcovers":
                 covers_dir = body.get("dir", "").strip() or cfg.get("covers_dir", "")
@@ -1042,22 +1223,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
   --muted: #9a8a5c; --green: #39ff88; --red: #ff5544;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
 html { scrollbar-color: var(--dim) var(--bg); }
-::-webkit-scrollbar { width: 10px; }
-::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: rgba(0,0,0,.3); }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 body {
   background: radial-gradient(ellipse at 50% 20%, #14110a 0%, #0a0906 60%, #060503 100%);
   color: var(--text); font-family: VT323, monospace; font-size: 19px;
-  min-height: 100vh;
+  overflow: hidden; display: flex; flex-direction: column;
 }
 a { color: var(--amber2); }
 a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
-/* ---- animated CRT layers ---- */
+/* ---- CRT tube ---- */
 #gridfloor {
   position: fixed; bottom: -6vh; left: -50%; width: 200%; height: 44vh;
-  pointer-events: none; z-index: 0; opacity: .5;
+  pointer-events: none; z-index: 0; opacity: .22;
   background:
     repeating-linear-gradient(90deg, rgba(255,176,0,.16) 0 2px, transparent 2px 70px),
     repeating-linear-gradient(0deg, rgba(255,176,0,.16) 0 2px, transparent 2px 46px);
@@ -1067,71 +1249,36 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
   mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
 }
 @keyframes gridmove { from { background-position-y: 0, 0; } to { background-position-y: 0, 46px; } }
-/* CRT tube: curved-corner bezel vignette + slow phosphor breathing */
 #crt { position: fixed; inset: 0; pointer-events: none; z-index: 95;
   border-radius: 22px;
   box-shadow: inset 0 0 130px rgba(0,0,0,.6), inset 0 0 24px rgba(0,0,0,.5); }
 #crt::before { content: ""; position: absolute; inset: 0; border-radius: 22px;
   background: radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,.5) 100%); }
 #crt::after { content: ""; position: absolute; inset: 0; border-radius: 22px;
-  background: radial-gradient(ellipse at 50% 42%, rgba(255,214,140,.055), transparent 62%);
+  background: radial-gradient(ellipse at 50% 42%, rgba(255,214,140,.05), transparent 62%);
   animation: hum 5.5s ease-in-out infinite; }
 @keyframes hum { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 #stars { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
 .starlayer { position: absolute; top: 0; left: 0; background: transparent;
   animation: twinkle 4s infinite alternate ease-in-out; }
-@keyframes twinkle { from { opacity: .2; } to { opacity: .85; } }
-/* slow pulsing phosphor line */
-.pulseline { height: 3px; background: linear-gradient(90deg,
+@keyframes twinkle { from { opacity: .2; } to { opacity: .8; } }
+.pulseline { height: 3px; flex-shrink: 0; background: linear-gradient(90deg,
   transparent, var(--amber) 18%, var(--amber2) 50%, var(--amber) 82%, transparent);
   animation: pulseline 3.4s ease-in-out infinite; }
 @keyframes pulseline {
   0%, 100% { opacity: .3; filter: none; }
   50% { opacity: 1; filter: drop-shadow(0 0 8px rgba(255,176,0,.8)); } }
-#termline { padding: 5px 24px 6px; color: var(--amber); font-size: 19px;
-  background: rgba(0,0,0,.35); border-bottom: 1px solid var(--line);
-  white-space: nowrap; overflow: hidden;
-  text-shadow: 0 0 8px rgba(255,176,0,.4); }
-#termline .cur { animation: blink 1.1s steps(1) infinite; }
-/* pixel alien flyby */
-#sprite { position: fixed; bottom: 13vh; left: 0; z-index: 0;
-  pointer-events: none; animation: flyby 34s linear infinite; opacity: .5; }
-@keyframes flyby {
-  0% { transform: translateX(-60px); }
-  100% { transform: translateX(110vw); } }
-.alien { width: 4px; height: 4px; background: transparent;
-  animation: bob
- .6s steps(2) infinite; box-shadow:
-  8px 0 var(--amber), 32px 0 var(--amber),
-  12px 4px var(--amber), 28px 4px var(--amber),
-  8px 8px var(--amber), 12px 8px var(--amber), 16px 8px var(--amber),
-  20px 8px var(--amber), 24px 8px var(--amber), 28px 8px var(--amber),
-  32px 8px var(--amber),
-  4px 12px var(--amber), 8px 12px var(--amber), 16px 12px var(--amber),
-  20px 12px var(--amber), 24px 12px var(--amber), 32px 12px var(--amber),
-  36px 12px var(--amber),
-  0 16px var(--amber), 4px 16px var(--amber), 8px 16px var(--amber),
-  12px 16px var(--amber), 16px 16px var(--amber), 20px 16px var(--amber),
-  24px 16px var(--amber), 28px 16px var(--amber), 32px 16px var(--amber),
-  36px 16px var(--amber), 40px 16px var(--amber),
-  0 20px var(--amber), 8px 20px var(--amber), 32px 20px var(--amber),
-  40px 20px var(--amber),
-  0 24px var(--amber), 40px 24px var(--amber),
-  12px 28px var(--amber), 28px 28px var(--amber); }
-@keyframes bob { 0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); } }
-/* ---- boot + loading overlays ---- */
-#boot { position: fixed; inset: 0; z-index: 200; background: #060503;
-  padding: 46px; }
+@keyframes pulse { 50% { opacity: .45; } }
+@keyframes blink { 50% { opacity: 0; } }
+/* ---- boot + loader ---- */
+#boot { position: fixed; inset: 0; z-index: 200; background: #060503; padding: 46px; }
+#boot pre { font-family: VT323, monospace; font-size: 22px; color: var(--amber);
+  text-shadow: 0 0 8px rgba(255,176,0,.6); line-height: 1.6; white-space: pre-wrap; }
 #boot.off { animation: crtoff .55s ease-in forwards; }
 @keyframes crtoff {
   0% { transform: scaleY(1); filter: brightness(1); opacity: 1; }
-  55% { transform: scaleY(.008); filter: brightness(2.6); opacity: 1;
-        background: #ffd75e; }
-  100% { transform: scaleY(.008) scaleX(.01); filter: brightness(3);
-         opacity: 0; background: #ffd75e; } }
-#boot pre { font-family: VT323, monospace; font-size: 22px; color: var(--amber);
-  text-shadow: 0 0 8px rgba(255,176,0,.6); line-height: 1.6; white-space: pre-wrap; }
+  55% { transform: scaleY(.008); filter: brightness(2.6); opacity: 1; background: #ffd75e; }
+  100% { transform: scaleY(.008) scaleX(.01); filter: brightness(3); opacity: 0; background: #ffd75e; } }
 #loader { position: fixed; inset: 0; z-index: 150; display: none;
   background: rgba(6,5,3,.93); text-align: center; }
 #loader .inner { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -1146,18 +1293,14 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
   var(--amber) 0 14px, #7a5500 14px 18px); }
 #loader.go .bar { animation: fill 1.6s steps(24) forwards; }
 @keyframes fill { to { width: 100%; } }
-@keyframes pulse { 50% { opacity: .45; } }
-@keyframes blink { 50% { opacity: 0; } }
 /* ---- header ---- */
-header { position: sticky; top: 0; z-index: 10;
-  background: rgba(10,9,6,.94); backdrop-filter: blur(2px);
-  border-bottom: 1px solid var(--line);
-  box-shadow: 0 4px 18px rgba(0,0,0,.5); }
-.bar { display: flex; align-items: center; gap: 22px; padding: 14px 24px 10px; }
+header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid var(--line);
+  box-shadow: 0 4px 18px rgba(0,0,0,.5); position: relative; z-index: 12; }
+.bar { display: flex; align-items: center; gap: 22px; padding: 10px 20px 8px; }
 .logo { display: flex; align-items: flex-end; gap: 6px; white-space: nowrap;
   cursor: pointer; user-select: none; }
 .logo pre { margin: 0; font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 12px; line-height: 1.12; font-weight: 700;
+  font-size: 11px; line-height: 1.12; font-weight: 700;
   background: linear-gradient(90deg, #7a5c00, var(--amber) 28%, var(--amber2) 50%,
     var(--amber) 72%, #7a5c00);
   background-size: 200% 100%;
@@ -1165,122 +1308,155 @@ header { position: sticky; top: 0; z-index: 10;
   animation: shimmer 4.5s linear infinite;
   filter: drop-shadow(0 0 7px rgba(255,176,0,.55)); }
 @keyframes shimmer { to { background-position-x: -200%; } }
-.logo .cur { color: var(--amber); font-size: 18px; line-height: 1;
-  animation: blink 1.1s steps(1) infinite;
-  text-shadow: 0 0 10px rgba(255,176,0,.7); }
-.searchwrap { flex: 1; max-width: 520px; position: relative; }
-.searchwrap::before { content: ">"; position: absolute; left: 14px; top: 6px;
+.logo .cur { color: var(--amber); font-size: 17px; line-height: 1;
+  animation: blink 1.1s steps(1) infinite; text-shadow: 0 0 10px rgba(255,176,0,.7); }
+.searchwrap { flex: 1; max-width: 460px; position: relative; }
+.searchwrap::before { content: ">"; position: absolute; left: 14px; top: 4px;
   color: var(--dim); font-size: 22px; }
-#search { width: 100%; height: 42px; background: rgba(0,0,0,.45);
+#search { width: 100%; height: 38px; background: rgba(0,0,0,.45);
   border: 1px solid var(--line); border-radius: 4px; padding: 0 16px 0 34px;
-  font: inherit; font-size: 21px; color: var(--amber2); outline: none; caret-color: var(--amber); }
+  font: inherit; font-size: 20px; color: var(--amber2); outline: none; caret-color: var(--amber); }
 #search::placeholder { color: var(--muted); }
 #search:focus { border-color: var(--amber);
   box-shadow: 0 0 12px rgba(255,176,0,.35), inset 0 0 8px rgba(255,176,0,.08); }
 #count { color: var(--muted); font-size: 18px; margin-left: auto; white-space: nowrap; }
 #padbadge { display: inline-flex; width: 26px; height: 26px; flex-shrink: 0; }
 #padbadge svg { width: 100%; height: 100%; fill: var(--line); transition: fill .2s; }
-#padbadge.on svg { fill: var(--green);
-  filter: drop-shadow(0 0 6px rgba(57,255,136,.7)); }
-#gphint { position: fixed; bottom: 0; left: 0; right: 0; text-align: center;
-  padding: 7px 10px; background: rgba(6,5,3,.92); border-top: 1px solid var(--line);
-  color: var(--muted); font-size: 17px; z-index: 96; display: none; }
-#gphint .kb { border: 1px solid var(--dim); border-radius: 3px; padding: 0 7px;
-  color: var(--amber); margin: 0 3px 0 10px; }
-.row.gpsel { border-color: var(--amber);
-  box-shadow: 0 0 18px rgba(255,176,0,.28), inset 0 0 24px rgba(255,176,0,.05);
-  transform: translateX(5px); }
-.row.gpsel .info .nm { color: var(--amber2); text-shadow: 0 0 10px rgba(255,176,0,.5); }
-.row.gpsel .playbtn { opacity: 1; animation: playpulse 1s ease-in-out infinite; }
-.tabs { display: flex; gap: 6px; padding: 0 24px; }
+#padbadge.on svg { fill: var(--green); filter: drop-shadow(0 0 6px rgba(57,255,136,.7)); }
+.tabs { display: flex; gap: 6px; padding: 0 20px; }
 .tabs button { background: none; border: none; font-family: 'Press Start 2P', monospace;
-  font-size: 11px; color: var(--muted); padding: 10px 14px 12px; cursor: pointer;
+  font-size: 10px; color: var(--muted); padding: 8px 12px 10px; cursor: pointer;
   border-bottom: 3px solid transparent; letter-spacing: 1px; }
 .tabs button.on { color: var(--amber); border-bottom-color: var(--amber);
   text-shadow: 0 0 10px rgba(255,176,0,.7); }
 .tabs button:hover:not(.on) { color: var(--text); }
-.chips { display: flex; gap: 8px; padding: 12px 24px 12px; flex-wrap: wrap;
-  max-width: 1020px; margin: 0 auto; }
-.chip { border: 1px solid var(--line); border-radius: 4px; padding: 4px 13px;
-  font-size: 18px; color: var(--text); cursor: pointer; background: rgba(0,0,0,.3);
-  white-space: nowrap; transition: box-shadow .12s, border-color .12s;
-  display: flex; align-items: center; }
-.chip:hover { border-color: var(--dim); }
-.chip.on { background: var(--amber); color: #0a0906; border-color: var(--amber);
-  box-shadow: 0 0 14px rgba(255,176,0,.5); }
-.chip span.n { color: var(--muted); font-size: 16px; margin-left: 5px; }
-.chip.on span.n { color: #4d3500; }
-.slogo { display: inline-flex; margin-right: 7px; flex-shrink: 0;
-  filter: drop-shadow(0 0 3px rgba(255,255,255,.2)); }
-.slogo svg { width: 100%; height: 100%; }
-/* ---- game list ---- */
-main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
-  position: relative; z-index: 1; }
-.row { display: flex; align-items: center; gap: 18px; padding: 12px 14px;
-  border-radius: 6px; cursor: pointer; position: relative;
-  background: var(--panel); border: 1px solid var(--line); margin-bottom: 10px;
-  transition: box-shadow .15s, border-color .15s, transform .15s;
-  animation: rowin .3s ease-out both; }
-@keyframes rowin { from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: none; } }
-.row:hover { border-color: var(--amber);
-  box-shadow: 0 0 18px rgba(255,176,0,.28), inset 0 0 24px rgba(255,176,0,.05);
-  transform: translateX(5px); }
-.cover, .shot { border-radius: 4px; background: var(--panel2); flex-shrink: 0;
-  overflow: hidden; display: flex; align-items: center; justify-content: center;
-  position: relative; border: 1px solid rgba(255,176,0,.12); }
-.cover::after, .shot::after { content: ""; position: absolute; inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px); }
-.cover { width: 72px; height: 96px; }
-.shot { width: 170px; height: 96px; }
-.cover img, .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.cover .ph { font-family: 'Press Start 2P', monospace; font-size: 15px; color: #fff;
+#termline { padding: 4px 20px 5px; color: var(--amber); font-size: 18px;
+  background: rgba(0,0,0,.35); border-bottom: 1px solid var(--line);
+  white-space: nowrap; overflow: hidden; flex-shrink: 0;
+  text-shadow: 0 0 8px rgba(255,176,0,.4); }
+#termline .cur { animation: blink 1.1s steps(1) infinite; }
+/* ---- three column shell ---- */
+#shell { flex: 1; display: flex; min-height: 0; position: relative; z-index: 1; }
+#sidebar { width: 226px; flex-shrink: 0; border-right: 1px solid var(--line);
+  background: rgba(10,9,6,.75); overflow-y: auto; padding: 10px 0 20px; }
+.side-h { font-family: 'Press Start 2P', monospace; font-size: 8px; color: var(--dim);
+  letter-spacing: 1px; padding: 14px 16px 7px; }
+.side-i { display: flex; align-items: center; gap: 9px; padding: 5px 16px;
+  cursor: pointer; color: var(--text); white-space: nowrap; }
+.side-i:hover { background: rgba(255,176,0,.07); color: var(--amber2); }
+.side-i.on { background: rgba(255,176,0,.14); color: var(--amber);
+  box-shadow: inset 3px 0 var(--amber); text-shadow: 0 0 8px rgba(255,176,0,.5); }
+.side-i .lbl { overflow: hidden; text-overflow: ellipsis; }
+.side-i .n { margin-left: auto; color: var(--muted); font-size: 16px; }
+.side-i.on .n { color: var(--amber); }
+/* ---- centre ---- */
+#centre { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#toolbar { flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: rgba(0,0,0,.25); }
+.tbtn { background: rgba(0,0,0,.3); border: 1px solid var(--line); color: var(--text);
+  font: inherit; font-size: 17px; padding: 3px 12px; border-radius: 4px; cursor: pointer; }
+.tbtn:hover { border-color: var(--dim); color: var(--amber2); }
+.tbtn.on { background: var(--amber); color: #0a0906; border-color: var(--amber);
+  box-shadow: 0 0 12px rgba(255,176,0,.45); }
+#toolbar .sp { margin-left: auto; color: var(--muted); font-size: 17px; }
+#view { flex: 1; overflow-y: auto; padding: 16px; }
+/* grid */
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 16px; }
+.tile { cursor: pointer; position: relative; animation: rowin .3s ease-out both; }
+@keyframes rowin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.tile .box { aspect-ratio: 3/4; border-radius: 5px; overflow: hidden; background: var(--panel2);
+  border: 2px solid var(--line); display: flex; align-items: center; justify-content: center;
+  position: relative; transition: border-color .13s, box-shadow .13s, transform .13s; }
+.tile .box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile .box .ph { font-family: 'Press Start 2P', monospace; font-size: 17px; color: #fff;
   text-shadow: 1px 2px 0 rgba(0,0,0,.45); }
-.shot .ph2 { font-family: 'Press Start 2P', monospace; font-size: 7px; color: var(--muted); }
-.info { min-width: 0; flex: 1; }
-.info .nm { font-size: 26px; color: var(--text); line-height: 1.1;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: color .12s, text-shadow .12s;
+.tile:hover .box { border-color: var(--dim); transform: translateY(-3px); }
+.tile.sel .box { border-color: var(--amber); transform: translateY(-3px);
+  box-shadow: 0 0 20px rgba(255,176,0,.45); }
+.tile .fav { position: absolute; top: 5px; right: 6px; color: var(--amber);
+  font-size: 20px; text-shadow: 0 0 6px rgba(0,0,0,.9); }
+.tile .cap { font-size: 17px; color: var(--text); margin-top: 6px; line-height: 1.15;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; }
+.tile.sel .cap { color: var(--amber2); }
+.tile .sub { font-size: 15px; color: var(--muted); }
+/* list */
+.row { display: flex; align-items: center; gap: 16px; padding: 9px 12px;
+  border-radius: 6px; cursor: pointer; background: var(--panel);
+  border: 1px solid var(--line); margin-bottom: 8px;
+  animation: rowin .3s ease-out both;
+  transition: box-shadow .13s, border-color .13s, transform .13s; }
+.row:hover { border-color: var(--dim); }
+.row.sel { border-color: var(--amber); transform: translateX(5px);
+  box-shadow: 0 0 18px rgba(255,176,0,.28); }
+.row .cover { width: 54px; height: 72px; flex-shrink: 0; border-radius: 4px;
+  overflow: hidden; background: var(--panel2); display: flex;
+  align-items: center; justify-content: center; }
+.row .cover img { width: 100%; height: 100%; object-fit: cover; }
+.row .cover .ph { font-family: 'Press Start 2P', monospace; font-size: 12px; color: #fff; }
+.row .shot { width: 128px; height: 72px; flex-shrink: 0; border-radius: 4px;
+  overflow: hidden; background: var(--panel2); display: flex;
+  align-items: center; justify-content: center; }
+.row .shot img { width: 100%; height: 100%; object-fit: cover; }
+.row .shot .ph2 { font-family: 'Press Start 2P', monospace; font-size: 6px; color: var(--muted); }
+.row .info { min-width: 0; flex: 1; }
+.row .nm { font-size: 24px; color: var(--text); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
   text-shadow: 1px 0 rgba(255,80,80,.16), -1px 0 rgba(80,220,255,.16); }
-.row:hover .info .nm { color: var(--amber2);
-  text-shadow: 0 0 10px rgba(255,176,0,.5),
-    1px 0 rgba(255,80,80,.25), -1px 0 rgba(80,220,255,.25); }
-.info .sub { font-size: 18px; color: var(--muted); margin-top: 3px;
+.row.sel .nm { color: var(--amber2); }
+.row .sub { font-size: 17px; color: var(--muted); display: flex; align-items: center; }
+/* ---- details panel ---- */
+#details { width: 320px; flex-shrink: 0; border-left: 1px solid var(--line);
+  background: rgba(10,9,6,.8); overflow-y: auto; }
+#details .empty2 { padding: 60px 22px; text-align: center; color: var(--muted); }
+.dcover { width: 100%; aspect-ratio: 3/4; max-height: 320px; object-fit: contain;
+  background: #000; border-bottom: 1px solid var(--line); display: block; }
+.dcover.ph3 { display: flex; align-items: center; justify-content: center;
+  font-family: 'Press Start 2P', monospace; font-size: 26px; color: #fff; }
+.dbody { padding: 14px 18px 26px; }
+.dtitle { font-size: 27px; color: var(--amber2); line-height: 1.1;
+  text-shadow: 0 0 10px rgba(255,176,0,.35); }
+.dsys { font-size: 17px; color: var(--muted); margin-top: 4px;
   display: flex; align-items: center; }
-.playbtn { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--amber);
-  color: var(--amber); background: rgba(0,0,0,.4); display: flex; align-items: center;
-  justify-content: center; font-size: 17px; flex-shrink: 0; opacity: 0;
-  transition: opacity .15s; padding-left: 4px; }
-.row:hover .playbtn { opacity: 1; animation: playpulse 1s ease-in-out infinite; }
-@keyframes playpulse {
-  0%, 100% { box-shadow: 0 0 6px rgba(255,176,0,.5); }
-  50% { box-shadow: 0 0 20px rgba(255,176,0,.9); }
-}
-.more { text-align: center; color: var(--muted); padding: 14px; font-size: 18px; }
-.empty { text-align: center; padding: 80px 20px; color: var(--muted); line-height: 2;
-  background: rgba(0,0,0,.25); border: 1px dashed var(--line); border-radius: 6px;
-  font-size: 20px; }
-.empty .big { font-family: 'Press Start 2P', monospace; font-size: 16px;
-  color: var(--amber); margin-bottom: 20px; text-shadow: 0 0 12px rgba(255,176,0,.6);
-  animation: pulse 1.4s steps(2) infinite; }
-.empty code { background: var(--panel2); border-radius: 3px; padding: 2px 8px;
-  color: var(--amber2); font-family: inherit; }
-/* ---- cards (systems / settings) ---- */
+.playbig { width: 100%; margin: 14px 0 12px; background: var(--amber); border: none;
+  color: #0a0906; font-family: 'Press Start 2P', monospace; font-size: 12px;
+  padding: 13px 0; border-radius: 5px; cursor: pointer; letter-spacing: 1px;
+  box-shadow: 0 0 16px rgba(255,176,0,.4); }
+.playbig:hover { background: var(--amber2); box-shadow: 0 0 26px rgba(255,176,0,.75); }
+.drow2 { display: flex; gap: 8px; margin-bottom: 14px; }
+.drow2 button { flex: 1; background: rgba(0,0,0,.3); border: 1px solid var(--line);
+  color: var(--text); font: inherit; font-size: 17px; padding: 5px 0;
+  border-radius: 4px; cursor: pointer; }
+.drow2 button:hover { border-color: var(--amber); color: var(--amber2); }
+.stars { font-size: 24px; color: var(--dim); letter-spacing: 3px; cursor: pointer;
+  margin-bottom: 12px; }
+.stars b { color: var(--amber); font-weight: 400;
+  text-shadow: 0 0 8px rgba(255,176,0,.6); }
+.dshot { width: 100%; border-radius: 4px; border: 1px solid var(--line);
+  display: block; margin-bottom: 14px; background: #000; }
+.dshot-ph { width: 100%; aspect-ratio: 4/3; border-radius: 4px;
+  border: 1px dashed var(--line); display: flex; align-items: center;
+  justify-content: center; color: var(--muted); font-size: 16px; margin-bottom: 14px; }
+.meta { width: 100%; border-collapse: collapse; }
+.meta td { padding: 5px 0; font-size: 17px; border-bottom: 1px solid rgba(58,47,20,.5);
+  vertical-align: top; }
+.meta td:first-child { color: var(--muted); width: 40%; }
+.meta td:last-child { color: var(--text); word-break: break-all; }
+/* ---- other tabs ---- */
+#pages { flex: 1; overflow-y: auto; padding: 18px 22px 60px; display: none; }
+#pages .inner2 { max-width: 1020px; margin: 0 auto; }
 .card { border: 1px solid var(--line); border-radius: 6px; padding: 16px 20px;
   margin: 14px 0; background: var(--panel); }
 .card:hover { border-color: var(--dim); }
 .card .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .card .head .nm { font-size: 24px; color: var(--amber2); }
 .pill { border-radius: 3px; padding: 2px 12px; font-size: 17px; border: 1px solid; }
-.pill.ok { border-color: var(--green); color: var(--green);
-  text-shadow: 0 0 8px rgba(57,255,136,.5); }
-.pill.bad { border-color: var(--red); color: var(--red);
-  text-shadow: 0 0 8px rgba(255,85,68,.5); animation: pulse 1.6s steps(2) infinite; }
+.pill.ok { border-color: var(--green); color: var(--green); text-shadow: 0 0 8px rgba(57,255,136,.5); }
+.pill.bad { border-color: var(--red); color: var(--red); text-shadow: 0 0 8px rgba(255,85,68,.5); }
 .pill.dlp { border-color: var(--amber); color: var(--amber);
   text-shadow: 0 0 8px rgba(255,176,0,.5); animation: pulse 1s steps(2) infinite; }
-.dim { color: var(--muted); font-size: 18px; margin-top: 8px; line-height: 1.5;
-  word-break: break-all; }
+.dim { color: var(--muted); font-size: 18px; margin-top: 8px; line-height: 1.5; word-break: break-all; }
 .dim b { color: var(--text); font-weight: 400; }
 .err { color: var(--red); font-size: 17px; margin-left: 10px; }
 .fields { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
@@ -1300,30 +1476,44 @@ button.outlined { background: rgba(0,0,0,.3); border: 1px solid var(--amber);
   color: var(--amber); font: inherit; font-size: 19px; padding: 6px 22px;
   border-radius: 4px; cursor: pointer; }
 button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
-#snack { position: fixed; bottom: 22px; left: 22px; background: rgba(6,5,3,.95);
-  color: var(--amber); border: 1px solid var(--amber); border-radius: 4px;
-  padding: 10px 22px; font-size: 20px; display: none; z-index: 160;
-  box-shadow: 0 0 18px rgba(255,176,0,.35); max-width: 70vw;
-  text-shadow: 0 0 8px rgba(255,176,0,.5); }
+.empty { text-align: center; padding: 70px 20px; color: var(--muted); line-height: 2;
+  background: rgba(0,0,0,.25); border: 1px dashed var(--line); border-radius: 6px; font-size: 20px; }
+.empty .big { font-family: 'Press Start 2P', monospace; font-size: 15px; color: var(--amber);
+  margin-bottom: 18px; text-shadow: 0 0 12px rgba(255,176,0,.6);
+  animation: pulse 1.4s steps(2) infinite; }
+.empty code { background: var(--panel2); border-radius: 3px; padding: 2px 8px;
+  color: var(--amber2); font-family: inherit; }
 .howto { color: var(--muted); font-size: 19px; line-height: 1.8; }
 .howto code { background: rgba(0,0,0,.4); border-radius: 3px; padding: 1px 7px;
   font-size: 18px; color: var(--amber2); font-family: inherit; }
 .howto h3 { color: var(--amber); font-size: 20px; font-weight: 400; margin: 14px 0 4px;
   text-shadow: 0 0 8px rgba(255,176,0,.4); }
-@media (max-width: 700px) { .shot { display: none; } #count { display: none; } }
+#snack { position: fixed; bottom: 22px; left: 22px; background: rgba(6,5,3,.95);
+  color: var(--amber); border: 1px solid var(--amber); border-radius: 4px;
+  padding: 10px 22px; font-size: 20px; display: none; z-index: 160;
+  box-shadow: 0 0 18px rgba(255,176,0,.35); max-width: 70vw;
+  text-shadow: 0 0 8px rgba(255,176,0,.5); }
+#gphint { position: fixed; bottom: 0; left: 0; right: 0; text-align: center;
+  padding: 5px 10px; background: rgba(6,5,3,.92); border-top: 1px solid var(--line);
+  color: var(--muted); font-size: 16px; z-index: 96; display: none; }
+#gphint .kb { border: 1px solid var(--dim); border-radius: 3px; padding: 0 7px;
+  color: var(--amber); margin: 0 3px 0 10px; }
+.slogo { display: inline-flex; margin-right: 7px; flex-shrink: 0; }
+.slogo svg { width: 100%; height: 100%; }
+@media (max-width: 1100px) { #details { display: none; } }
+@media (max-width: 820px) { #sidebar { display: none; } }
 </style>
 </head>
 <body>
 <div id="gridfloor"></div>
 <div id="stars"></div>
-<div id="sprite"><div class="alien"></div></div>
 <header>
   <div class="bar">
     <div class="logo" onclick="setTab('games')"><pre>
 █▀█ █▀▀ ▀█▀ █▀█ █▀█ █▀▀ █ █ █▀▀ █   █▀▀
 █▀▄ ██▄  █  █▀▄ █▄█ ▄▄█ █▀█ ██▄ █▄▄ █▀ </pre><span class="cur">▮</span></div>
     <div class="searchwrap">
-      <input id="search" placeholder="search games..." oninput="render()" autocomplete="off">
+      <input id="search" placeholder="search games..." oninput="onSearch()" autocomplete="off">
     </div>
     <span id="count"></span>
     <span id="padbadge" title="No controller — press any button on the pad">
@@ -1337,12 +1527,25 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
   </div>
   <div class="pulseline"></div>
   <div id="termline">&gt; <span id="termtext"></span><span class="cur">▮</span></div>
-  <div class="chips" id="chips"></div>
 </header>
-<main id="content"></main>
-<div id="gphint"><span class="kb">▲▼</span> move <span class="kb">A</span> play
-  <span class="kb">◀▶</span> system <span class="kb">LB RB</span> tab
-  <span class="kb">Y</span> rescan <span class="kb">B</span> top</div>
+<div id="shell">
+  <aside id="sidebar"></aside>
+  <div id="centre">
+    <div id="toolbar">
+      <button class="tbtn" id="v-grid" onclick="setView('grid')">▦ GRID</button>
+      <button class="tbtn" id="v-list" onclick="setView('list')">☰ LIST</button>
+      <button class="tbtn" onclick="cycleSort()" id="sortbtn">SORT: NAME</button>
+      <button class="tbtn" onclick="snack('RESCANNING...');refresh(true)">⟳ RESCAN</button>
+      <span class="sp" id="shown"></span>
+    </div>
+    <div id="view"></div>
+  </div>
+  <aside id="details"></aside>
+</div>
+<div id="pages"><div class="inner2" id="pagebody"></div></div>
+<div id="gphint"><span class="kb">◀▲▼▶</span> move <span class="kb">A</span> play
+  <span class="kb">X</span> favourite <span class="kb">LB RB</span> tab
+  <span class="kb">Y</span> rescan</div>
 <div id="snack"></div>
 <div id="loader"><div class="inner">
   <div class="pulseline" style="margin-bottom:26px"></div>
@@ -1357,27 +1560,22 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 let state = null;
 let tab = 'games';
 let sel = 'all';
-let shown = 400;
+let view = localStorage.getItem('rs_view') || 'grid';
+let sortMode = localStorage.getItem('rs_sort') || 'name';
+let shown = 300;
+let curGame = null;
+let curList = [];
 
-/* per-system colour, short label, icon shape */
 const META = {
-  nes:       ['#e60012', 'NES',   'cart'],
-  snes:      ['#7b5aa6', 'SNES',  'cart'],
-  n64:       ['#009e60', 'N64',   'cart'],
-  gb:        ['#8b956d', 'GB',    'hand'],
-  gba:       ['#5c67c6', 'GBA',   'hand'],
-  nds:       ['#7f8ea3', 'DS',    'hand'],
-  gamecube:  ['#6a5fc1', 'GC',    'disc'],
-  wii:       ['#3aa6dd', 'WII',   'disc'],
-  genesis:   ['#0060a8', 'MD',    'cart'],
-  dreamcast: ['#f0762f', 'DC',    'disc'],
-  ps1:       ['#4f5bd5', 'PS1',   'disc'],
-  ps2:       ['#2a3b8f', 'PS2',   'disc'],
-  psp:       ['#8a8f98', 'PSP',   'hand'],
-  arcade:    ['#d81b60', 'ARC',   'arc'],
-  atari2600: ['#b7410e', '2600',  'cart'],
-  c64:       ['#a97142', 'C64',   'comp'],
-  amiga:     ['#d33f49', 'AMIGA', 'comp']
+  nes:['#e60012','NES','cart'], snes:['#7b5aa6','SNES','cart'],
+  n64:['#009e60','N64','cart'], gb:['#8b956d','GB','hand'],
+  gba:['#5c67c6','GBA','hand'], nds:['#7f8ea3','DS','hand'],
+  gamecube:['#6a5fc1','GC','disc'], wii:['#3aa6dd','WII','disc'],
+  genesis:['#0060a8','MD','cart'], dreamcast:['#f0762f','DC','disc'],
+  ps1:['#4f5bd5','PS1','disc'], ps2:['#2a3b8f','PS2','disc'],
+  psp:['#8a8f98','PSP','hand'], arcade:['#d81b60','ARC','arc'],
+  atari2600:['#b7410e','2600','cart'], c64:['#a97142','C64','comp'],
+  amiga:['#d33f49','AMIGA','comp']
 };
 const ICONS = {
   cart: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M4 3h16v10h-3v5H7v-5H4z"/><rect x="7.5" y="6" width="9" height="3.5" fill="rgba(0,0,0,.45)"/></svg>`,
@@ -1386,502 +1584,571 @@ const ICONS = {
   arc:  c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M5 2h14v7l-2 3v10H7V12L5 9z"/><rect x="8" y="4.5" width="8" height="4" fill="rgba(0,0,0,.45)"/><circle cx="10" cy="16" r="1.2" fill="rgba(0,0,0,.45)"/><rect x="13" y="15.2" width="4" height="1.6" fill="rgba(0,0,0,.45)"/></svg>`,
   comp: c => `<svg viewBox="0 0 24 24" fill="${c}"><path d="M3 8h18v7l1.5 5H1.5L3 15z"/><rect x="4.5" y="16.5" width="15" height="1.8" fill="rgba(0,0,0,.45)"/><rect x="5" y="9.8" width="14" height="3.4" fill="rgba(0,0,0,.3)"/></svg>`
 };
-function sysColor(id) { return (META[id] || ['#9a8a5c'])[0]; }
-function sysLabel(id) { return (META[id] || [0, id.toUpperCase()])[1]; }
-function sysLogo(id, size) {
-  const m = META[id];
-  if (!m) return '';
-  return `<span class="slogo" style="width:${size}px;height:${size}px">${ICONS[m[2]](m[0])}</span>`;
-}
+function sysColor(id){ return (META[id]||['#9a8a5c'])[0]; }
+function sysLabel(id){ return (META[id]||[0,id.toUpperCase()])[1]; }
+function sysLogo(id,size){ const m=META[id]; if(!m) return '';
+  return `<span class="slogo" style="width:${size}px;height:${size}px">${ICONS[m[2]](m[0])}</span>`; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-/* drifting pixel starfield */
-(function stars() {
+/* starfield */
+(function stars(){
   const host = document.getElementById('stars');
-  const mk = (n, size, dur, color) => {
-    const d = document.createElement('div');
-    d.className = 'starlayer';
-    const sh = [];
-    for (let i = 0; i < n; i++)
-      sh.push((Math.random() * 100).toFixed(1) + 'vw ' +
-              (Math.random() * 100).toFixed(1) + 'vh 0 ' + color);
-    d.style.boxShadow = sh.join(',');
-    d.style.width = d.style.height = size + 'px';
-    d.style.animationDuration = dur + 's';
-    d.style.animationDelay = (-Math.random() * dur) + 's';
+  const mk = (n,size,dur,color) => {
+    const d = document.createElement('div'); d.className='starlayer';
+    const sh=[];
+    for(let i=0;i<n;i++) sh.push((Math.random()*100).toFixed(1)+'vw '+
+      (Math.random()*100).toFixed(1)+'vh 0 '+color);
+    d.style.boxShadow=sh.join(','); d.style.width=d.style.height=size+'px';
+    d.style.animationDuration=dur+'s'; d.style.animationDelay=(-Math.random()*dur)+'s';
     host.appendChild(d);
   };
-  mk(55, 2, 4.6, 'rgba(232,217,176,.55)');
-  mk(28, 3, 3.2, 'rgba(255,176,0,.5)');
+  mk(50,2,4.6,'rgba(232,217,176,.5)'); mk(24,3,3.2,'rgba(255,176,0,.45)');
 })();
 
-/* typing terminal line */
-let _termT = null;
-function typeTerm(text) {
-  const el = document.getElementById('termtext');
-  clearInterval(_termT);
-  let i = 0;
-  _termT = setInterval(() => {
-    i += 2;
-    el.textContent = text.slice(0, i);
-    if (i >= text.length) clearInterval(_termT);
-  }, 14);
+let _termT=null;
+function typeTerm(text){
+  const el=document.getElementById('termtext'); clearInterval(_termT);
+  let i=0; _termT=setInterval(()=>{ i+=2; el.textContent=text.slice(0,i);
+    if(i>=text.length) clearInterval(_termT); },14);
 }
-let _termInit = false;
+let _termInit=false;
 
-/* boot sequence */
-const BOOT = 'RETROSHELF BIOS v4.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING GAME LIBRARY ...\n\nREADY.';
-(function boot() {
-  const el = document.getElementById('boottext');
-  const box = document.getElementById('boot');
-  let i = 0;
-  const t = setInterval(() => {
-    i += 3;
-    el.textContent = BOOT.slice(0, i) + '▮';
-    if (i >= BOOT.length) {
-      clearInterval(t);
-      el.textContent = BOOT;
-      setTimeout(() => box.classList.add('off'), 300);
-      setTimeout(() => box.remove(), 900);
-    }
-  }, 16);
+const BOOT='RETROSHELF BIOS v5.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING GAME LIBRARY ...\n\nREADY.';
+(function boot(){
+  const el=document.getElementById('boottext'), box=document.getElementById('boot');
+  let i=0; const t=setInterval(()=>{ i+=3; el.textContent=BOOT.slice(0,i)+'▮';
+    if(i>=BOOT.length){ clearInterval(t); el.textContent=BOOT;
+      setTimeout(()=>box.classList.add('off'),300); setTimeout(()=>box.remove(),900);} },16);
 })();
 
-async function refresh(rescan) {
-  if (rescan) typeTerm('LOAD "*",8,1  SEARCHING FOR GAMES...');
-  state = await (await fetch('/api/state' + (rescan ? '?rescan=1' : ''))).json();
+async function refresh(rescan){
+  if(rescan) typeTerm('LOAD "*",8,1  SEARCHING FOR GAMES...');
+  state = await (await fetch('/api/state'+(rescan?'?rescan=1':''))).json();
   render();
-  if (!_termInit || rescan) {
-    _termInit = true;
-    typeTerm('LOAD "*",8,1  SEARCHING... ' + allGames().length
-             + ' GAMES FOUND. READY.');
-  }
+  if(!_termInit||rescan){ _termInit=true;
+    typeTerm('LOAD "*",8,1  SEARCHING... '+allGames().length+' GAMES FOUND. READY.'); }
 }
 
-function setTab(t) {
-  tab = t;
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('on'));
-  document.getElementById('tab-' + t).classList.add('on');
+function setTab(t){
+  tab=t;
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));
+  document.getElementById('tab-'+t).classList.add('on');
+  document.getElementById('shell').style.display = t==='games'?'flex':'none';
+  document.getElementById('pages').style.display = t==='games'?'none':'block';
   render();
-  if (!state) return;
-  if (t === 'games')
-    typeTerm('LOAD "GAMES",8,1: ' + allGames().length + ' FOUND. READY.');
-  else if (t === 'systems')
-    typeTerm('SYS 49152: ' + state.systems.filter(s => s.emu_found).length
-             + ' OF ' + state.systems.length + ' EMULATORS READY.');
-  else
-    typeTerm('OPEN 15,8,15,"CONFIG": READY.');
+  if(!state) return;
+  if(t==='games') typeTerm('LOAD "GAMES",8,1: '+allGames().length+' FOUND. READY.');
+  else if(t==='systems') typeTerm('SYS 49152: '+state.systems.filter(s=>s.emu_found).length+
+    ' OF '+state.systems.length+' EMULATORS READY.');
+  else typeTerm('OPEN 15,8,15,"CONFIG": READY.');
 }
 
-function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+function setView(v){ view=v; localStorage.setItem('rs_view',v); shown=300; render(); }
+function cycleSort(){
+  const modes=['name','recent','plays','system'];
+  sortMode=modes[(modes.indexOf(sortMode)+1)%modes.length];
+  localStorage.setItem('rs_sort',sortMode); render();
 }
+function onSearch(){ shown=300; render(); }
 
-function snack(msg) {
-  const t = document.getElementById('snack');
-  t.textContent = '> ' + msg;
-  t.style.display = 'block';
-  clearTimeout(t._h);
-  t._h = setTimeout(() => t.style.display = 'none', 3200);
+function snack(msg){
+  const t=document.getElementById('snack'); t.textContent='> '+msg;
+  t.style.display='block'; clearTimeout(t._h);
+  t._h=setTimeout(()=>t.style.display='none',3200);
 }
-
-function showLoader(name) {
-  const l = document.getElementById('loader');
-  document.getElementById('loadname').textContent = name;
-  l.classList.remove('go');
-  void l.offsetWidth;
-  l.style.display = 'block';
-  l.classList.add('go');
+function showLoader(name){
+  const l=document.getElementById('loader');
+  document.getElementById('loadname').textContent=name;
+  l.classList.remove('go'); void l.offsetWidth; l.style.display='block'; l.classList.add('go');
 }
-function hideLoader() { document.getElementById('loader').style.display = 'none'; }
+function hideLoader(){ document.getElementById('loader').style.display='none'; }
 
-async function launch(sysId, rom, name) {
-  typeTerm('RUN "' + name.toUpperCase() + '"');
-  showLoader(name);
-  const r = await (await fetch('/api/launch', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({system: sysId, rom: rom})})).json();
-  if (!r.ok) {
-    hideLoader();
-    snack('ERROR: ' + r.msg);
-    if (r.msg.startsWith('no emulator')) setTab('systems');
-  } else {
-    setTimeout(hideLoader, 1750);
-    setTimeout(() => refresh(), 900);
-  }
-}
-
-let _poll = null;
-function pollDownloads() {
-  if (_poll) return;
-  _poll = setInterval(async () => {
-    await refresh();
-    const act = Object.values(state.downloads || {})
-      .some(d => ['resolving', 'downloading', 'extracting'].includes(d.status));
-    if (!act) { clearInterval(_poll); _poll = null; refresh(); }
-  }, 1200);
-}
-
-async function download(id) {
-  const r = await (await fetch('/api/download', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({id: id})})).json();
-  snack(r.ok ? 'DOWNLOADING ' + sysLabel(id) + ' EMULATOR' : 'ERROR: ' + r.msg);
-  if (r.ok) pollDownloads();
-}
-
-function allGames() {
-  const out = [];
-  for (const s of state.systems)
-    for (const g of s.games) out.push({...g, sysId: s.id, sysName: s.name});
-  out.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1);
+function allGames(){
+  const out=[];
+  for(const s of state.systems) for(const g of s.games)
+    out.push({...g, sysId:s.id, sysName:s.name});
   return out;
 }
+function ago(ts){
+  if(!ts) return '';
+  const d=Math.floor(Date.now()/1000-ts);
+  if(d<3600) return 'just now';
+  if(d<86400) return Math.floor(d/3600)+'h ago';
+  if(d<86400*30) return Math.floor(d/86400)+'d ago';
+  return new Date(ts*1000).toLocaleDateString();
+}
+function fmtSize(b){
+  if(!b) return '-';
+  const u=['B','KB','MB','GB']; let i=0; while(b>=1024&&i<3){b/=1024;i++;}
+  return b.toFixed(i?1:0)+' '+u[i];
+}
+function coverUrl(g){ return '/api/art?system='+g.sysId+'&rom='+encodeURIComponent(g.file); }
+function shotUrl(g){ return '/api/art?system='+g.sysId+'&kind=screen&rom='+encodeURIComponent(g.file); }
 
-function ago(ts) {
-  if (!ts) return '';
-  const d = Math.floor(Date.now()/1000 - ts);
-  if (d < 3600) return 'played just now';
-  if (d < 86400) return 'played ' + Math.floor(d/3600) + 'h ago';
-  if (d < 86400*30) return 'played ' + Math.floor(d/86400) + 'd ago';
-  return 'played ' + new Date(ts*1000).toLocaleDateString();
+function currentGames(){
+  let games;
+  if(sel==='all') games=allGames();
+  else if(sel==='fav') games=allGames().filter(g=>g.fav);
+  else if(sel==='recent') games=allGames().filter(g=>g.last).sort((a,b)=>b.last-a.last);
+  else { const s=state.systems.find(x=>x.id===sel)||{games:[],name:''};
+         games=s.games.map(g=>({...g,sysId:s.id,sysName:s.name})); }
+  const q=document.getElementById('search').value.trim().toLowerCase();
+  if(q) games=games.filter(g=>g.name.toLowerCase().includes(q));
+  if(sel!=='recent'){
+    if(sortMode==='name') games.sort((a,b)=>a.name.toLowerCase()<b.name.toLowerCase()?-1:1);
+    else if(sortMode==='recent') games.sort((a,b)=>(b.last||0)-(a.last||0));
+    else if(sortMode==='plays') games.sort((a,b)=>(b.plays||0)-(a.plays||0));
+    else if(sortMode==='system') games.sort((a,b)=>
+      (a.sysName+a.name).toLowerCase()<(b.sysName+b.name).toLowerCase()?-1:1);
+  }
+  return games;
 }
 
-function render() {
-  if (!state) return;
-  const content = document.getElementById('content');
-  const chips = document.getElementById('chips');
-  const search = document.getElementById('search');
-  const count = document.getElementById('count');
-  chips.style.display = tab === 'games' ? '' : 'none';
+function render(){
+  if(!state) return;
+  if(tab!=='games'){ renderPage(); return; }
+  renderSidebar();
+  const games=currentGames();
+  curList=games;
+  document.getElementById('count').textContent =
+    games.length+(games.length===1?' game':' games');
+  document.getElementById('sortbtn').textContent='SORT: '+sortMode.toUpperCase();
+  document.getElementById('v-grid').classList.toggle('on',view==='grid');
+  document.getElementById('v-list').classList.toggle('on',view==='list');
+  const host=document.getElementById('view');
 
-  if (tab === 'games') {
-    const withGames = state.systems.filter(s => s.games.length);
-    chips.innerHTML =
-      `<div class="chip ${sel==='all'?'on':''}" onclick="sel='all';shown=400;render()">ALL<span class="n">${allGames().length}</span></div>` +
-      withGames.map(s =>
-        `<div class="chip ${sel===s.id?'on':''}" onclick="sel='${s.id}';shown=400;render()">${sysLogo(s.id,17)}${esc(s.name)}<span class="n">${s.games.length}</span></div>`
-      ).join('') +
-      `<div class="chip" onclick="snack('RESCANNING...');refresh(true)">⟳ RESCAN</div>`;
+  if(!games.length){
+    document.getElementById('shown').textContent='';
+    host.innerHTML=`<div class="empty"><div class="big">INSERT CARTRIDGE</div>
+      Nothing here yet. Point RetroShelf at your games folder in
+      <b>SETTINGS</b> &mdash; it scans every subfolder automatically.</div>`;
+    renderDetails(); return;
+  }
+  const total=games.length;
+  const list=games.slice(0,shown);
+  document.getElementById('shown').textContent=
+    'showing '+list.length+' of '+total;
 
-    let games = sel === 'all' ? allGames()
-      : (state.systems.find(s => s.id === sel) || {games:[]}).games
-          .map(g => ({...g, sysId: sel,
-                      sysName: (state.systems.find(s => s.id === sel) || {}).name || ''}));
-    const q = search.value.trim().toLowerCase();
-    if (q) games = games.filter(g => g.name.toLowerCase().includes(q));
-    count.textContent = games.length + (games.length === 1 ? ' game' : ' games');
-
-    if (!games.length) {
-      content.innerHTML = `<div class="empty">
-        <div class="big">INSERT CARTRIDGE</div>
-        No games found in <code>${esc(state.library_root)}</code><br>
-        Point RetroShelf at your games folder in the <b>SETTINGS</b> tab &mdash;
-        it scans every subfolder automatically.</div>`;
-      return;
-    }
-    const total = games.length;
-    games = games.slice(0, shown);
-    content.innerHTML = games.map((g, gi) => {
-      const cover = g.art
-        ? `<img loading="lazy" src="/api/art?system=${g.sysId}&rom=${encodeURIComponent(g.file)}">`
-        : `<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
-      const coverBg = g.art ? '' :
-        ` style="background:linear-gradient(150deg, ${sysColor(g.sysId)}, #17130b)"`;
-      const shot = g.shot
-        ? `<img loading="lazy" src="/api/art?system=${g.sysId}&kind=screen&rom=${encodeURIComponent(g.file)}">`
-        : `<span class="ph2">NO SCREENSHOT</span>`;
-      const sub = [g.sysName, g.plays ? g.plays + (g.plays === 1 ? ' play' : ' plays') : null,
-                   ago(g.last) || null].filter(Boolean).join(' · ');
-      return `<div class="row" style="animation-delay:${Math.min(gi, 16) * 28}ms" onclick='launch(${JSON.stringify(g.sysId)}, ${JSON.stringify(g.file)}, ${JSON.stringify(g.name)})'>
-        <div class="cover"${coverBg}>${cover}</div>
+  if(view==='grid'){
+    host.innerHTML='<div id="grid">'+list.map((g,i)=>{
+      const art=g.art?`<img loading="lazy" src="${coverUrl(g)}">`
+        :`<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
+      const bg=g.art?'':` style="background:linear-gradient(150deg,${sysColor(g.sysId)},#17130b)"`;
+      return `<div class="tile${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
+        style="animation-delay:${Math.min(i,20)*22}ms"
+        onclick="pick(${i})" ondblclick="playIdx(${i})">
+        <div class="box"${bg}>${art}${g.fav?'<span class="fav">★</span>':''}</div>
+        <div class="cap">${esc(g.name)}</div>
+        <div class="sub">${esc(sysLabel(g.sysId))}${g.plays?' · '+g.plays+'▶':''}</div></div>`;
+    }).join('')+'</div>'+moreBtn(total);
+  } else {
+    host.innerHTML=list.map((g,i)=>{
+      const art=g.art?`<img loading="lazy" src="${coverUrl(g)}">`
+        :`<span class="ph">${esc(g.name.slice(0,2).toUpperCase())}</span>`;
+      const bg=g.art?'':` style="background:linear-gradient(150deg,${sysColor(g.sysId)},#17130b)"`;
+      const shot=g.shot?`<img loading="lazy" src="${shotUrl(g)}">`
+        :`<span class="ph2">NO SHOT</span>`;
+      const sub=[g.sysName,g.plays?g.plays+(g.plays===1?' play':' plays'):null,
+        g.last?'played '+ago(g.last):null].filter(Boolean).join(' · ');
+      return `<div class="row${curGame&&curGame.file===g.file?' sel':''}" data-i="${i}"
+        style="animation-delay:${Math.min(i,16)*22}ms"
+        onclick="pick(${i})" ondblclick="playIdx(${i})">
+        <div class="cover"${bg}>${art}</div>
         <div class="shot">${shot}</div>
-        <div class="info"><div class="nm">${esc(g.name)}</div>
-          <div class="sub">${sysLogo(g.sysId,15)}${esc(sub)}</div></div>
-        <div class="playbtn">▶</div></div>`;
-    }).join('') + (total > shown
-      ? `<div class="more"><button class="outlined" onclick="shown+=400;render()">SHOW MORE (${total - shown} left)</button></div>` : '');
-    if (activePad()) applyGpSel(false);
+        <div class="info"><div class="nm">${g.fav?'★ ':''}${esc(g.name)}</div>
+          <div class="sub">${sysLogo(g.sysId,14)}${esc(sub)}</div></div></div>`;
+    }).join('')+moreBtn(total);
+  }
+  renderDetails();
+}
+function moreBtn(total){
+  return total>shown
+    ? `<div style="text-align:center;padding:18px"><button class="outlined"
+       onclick="shown+=300;render()">SHOW MORE (${total-shown} LEFT)</button></div>` : '';
+}
 
-  } else if (tab === 'systems') {
-    count.textContent = state.systems.filter(s => s.emu_found).length + ' of ' +
-      state.systems.length + ' emulators ready';
-    content.innerHTML = state.systems.map(s => {
-      const d = (state.downloads || {})[s.id];
-      const busy = d && ['resolving', 'downloading', 'extracting'].includes(d.status);
+function renderSidebar(){
+  const withGames=state.systems.filter(s=>s.games.length);
+  const all=allGames();
+  const favs=all.filter(g=>g.fav).length;
+  const recents=all.filter(g=>g.last).length;
+  let h=`<div class="side-h">LIBRARY</div>`;
+  h+=item('all','▦','All Games',all.length);
+  h+=item('fav','★','Favourites',favs);
+  h+=item('recent','◷','Recently Played',recents);
+  h+=`<div class="side-h">PLATFORMS</div>`;
+  for(const s of withGames)
+    h+=`<div class="side-i${sel===s.id?' on':''}" onclick="pickSys('${s.id}')">
+      ${sysLogo(s.id,16)}<span class="lbl">${esc(s.name)}</span>
+      <span class="n">${s.games.length}</span></div>`;
+  document.getElementById('sidebar').innerHTML=h;
+  function item(id,ic,label,n){
+    return `<div class="side-i${sel===id?' on':''}" onclick="pickSys('${id}')">
+      <span style="width:16px;text-align:center;color:${sel===id?'var(--amber)':'var(--dim)'}">${ic}</span>
+      <span class="lbl">${label}</span><span class="n">${n}</span></div>`;
+  }
+}
+function pickSys(id){ sel=id; shown=300; render();
+  document.getElementById('view').scrollTop=0; }
+
+function pick(i){
+  curGame=curList[i]||null;
+  markSel();
+  renderDetails();
+  loadDetails();
+}
+function markSel(){
+  document.querySelectorAll('.tile,.row').forEach(el=>{
+    el.classList.toggle('sel', curGame && curList[+el.dataset.i]
+      && curList[+el.dataset.i].file===curGame.file);
+  });
+}
+function playIdx(i){ const g=curList[i]; if(g) launch(g.sysId,g.file,g.name); }
+
+let _det={};
+async function loadDetails(){
+  if(!curGame) return;
+  const f=curGame.file;
+  if(_det[f]) return;
+  try{
+    _det[f]=await (await fetch('/api/details?rom='+encodeURIComponent(f))).json();
+    if(curGame && curGame.file===f) renderDetails();
+  }catch(e){}
+}
+
+function renderDetails(){
+  const el=document.getElementById('details');
+  const g=curGame;
+  if(!g){ el.innerHTML=`<div class="empty2">Select a game to see its details.</div>`; return; }
+  const d=_det[g.file]||{};
+  const cover=g.art?`<img class="dcover" src="${coverUrl(g)}">`
+    :`<div class="dcover ph3" style="background:linear-gradient(150deg,${sysColor(g.sysId)},#17130b)">
+       ${esc(g.name.slice(0,2).toUpperCase())}</div>`;
+  const shot=g.shot?`<img class="dshot" src="${shotUrl(g)}">`
+    :`<div class="dshot-ph">no screenshot yet</div>`;
+  let stars='';
+  for(let i=1;i<=5;i++)
+    stars+=(i<=(g.rating||0)?`<b onclick="setRating(${i})">★</b>`
+                            :`<span onclick="setRating(${i})">☆</span>`);
+  el.innerHTML=`${cover}<div class="dbody">
+    <div class="dtitle">${esc(g.name)}</div>
+    <div class="dsys">${sysLogo(g.sysId,15)}${esc(g.sysName||'')}</div>
+    <button class="playbig" onclick="launch(${JSON.stringify(g.sysId)},${JSON.stringify(g.file)},${JSON.stringify(g.name)})">▶ PLAY</button>
+    <div class="drow2">
+      <button onclick="toggleFav()">${g.fav?'★ FAVOURITE':'☆ FAVOURITE'}</button>
+      <button onclick="openFolder()">📁 FOLDER</button>
+    </div>
+    <div class="stars">${stars}</div>
+    ${shot}
+    <table class="meta">
+      <tr><td>Platform</td><td>${esc(g.sysName||'')}</td></tr>
+      <tr><td>Play count</td><td>${g.plays||0}</td></tr>
+      <tr><td>Last played</td><td>${g.last?esc(ago(g.last)):'never'}</td></tr>
+      <tr><td>Rating</td><td>${g.rating?g.rating+' / 5':'not rated'}</td></tr>
+      <tr><td>File</td><td>${esc(d.file||'')}</td></tr>
+      <tr><td>Size</td><td>${fmtSize(d.size)}</td></tr>
+      <tr><td>Folder</td><td>${esc(d.folder||'')}</td></tr>
+    </table></div>`;
+}
+
+async function toggleFav(){
+  if(!curGame) return;
+  const nv=!curGame.fav;
+  curGame.fav=nv;
+  await fetch('/api/meta',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rom:curGame.file,fav:nv})});
+  const g=allGames().find(x=>x.file===curGame.file); if(g) g.fav=nv;
+  for(const s of state.systems) for(const x of s.games)
+    if(x.file===curGame.file) x.fav=nv;
+  snack(nv?'ADDED TO FAVOURITES':'REMOVED FROM FAVOURITES');
+  render();
+}
+async function setRating(n){
+  if(!curGame) return;
+  const v=(curGame.rating===n)?0:n;
+  curGame.rating=v;
+  await fetch('/api/meta',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rom:curGame.file,rating:v})});
+  for(const s of state.systems) for(const x of s.games)
+    if(x.file===curGame.file) x.rating=v;
+  renderDetails();
+}
+function openFolder(){
+  if(!curGame) return;
+  const d=_det[curGame.file]||{};
+  snack(d.folder||'unknown folder');
+}
+
+async function launch(sysId,rom,name){
+  typeTerm('RUN "'+name.toUpperCase()+'"');
+  showLoader(name);
+  const r=await (await fetch('/api/launch',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({system:sysId,rom:rom})})).json();
+  if(!r.ok){ hideLoader(); snack('ERROR: '+r.msg);
+    if(r.msg.startsWith('no emulator')) setTab('systems'); }
+  else { setTimeout(hideLoader,1750); setTimeout(()=>refresh(),900); }
+}
+
+/* ---------- systems / settings pages ---------- */
+function renderPage(){
+  const body=document.getElementById('pagebody');
+  const count=document.getElementById('count');
+  if(tab==='systems'){
+    count.textContent=state.systems.filter(s=>s.emu_found).length+' of '+
+      state.systems.length+' emulators ready';
+    body.innerHTML=state.systems.map(s=>{
+      const d=(state.downloads||{})[s.id];
+      const busy=d&&['resolving','downloading','extracting'].includes(d.status);
       let status;
-      if (s.emu_found) status = `<span class="pill ok">READY</span>`;
-      else if (busy) {
-        const lbl = d.status === 'downloading' ? 'DOWNLOADING ' + (d.pct || 0) + '%'
-                  : d.status.toUpperCase() + '...';
-        status = `<span class="pill dlp">${lbl}</span>`;
-      } else status = `<span class="pill bad">EMULATOR MISSING</span>`;
-      const err = (d && d.status === 'error')
-        ? `<span class="err">DOWNLOAD FAILED: ${esc(d.msg)}</span>` : '';
+      if(s.emu_found) status=`<span class="pill ok">READY</span>`;
+      else if(busy){ const lbl=d.status==='downloading'?'DOWNLOADING '+(d.pct||0)+'%'
+        :d.status.toUpperCase()+'...'; status=`<span class="pill dlp">${lbl}</span>`; }
+      else status=`<span class="pill bad">EMULATOR MISSING</span>`;
+      const err=(d&&d.status==='error')?`<span class="err">FAILED: ${esc(d.msg)}</span>`:'';
+      const link=`<a href="${s.emu_url}" target="_blank">${esc(s.emu_site)}</a>`;
       let detail;
-      const link = `<a href="${s.emu_url}" target="_blank">${esc(s.emu_site)}</a>`;
-      if (s.emu_found) detail = `Using <b>${esc(s.emu_path)}</b>`;
-      else if (s.dl === 'auto')
-        detail = `Needs <b>${esc(s.emu_name)}</b> &mdash; click DOWNLOAD and RetroShelf
-          installs it into <b>${esc(s.emu_dir)}\\</b>, or get it yourself from ${link}.`;
-      else
-        detail = `Needs <b>${esc(s.emu_name)}</b> &mdash; download it from ${link}
-          and unzip into <b>${esc(s.emu_dir)}\\</b>.`;
-      const note = s.note ? `<div class="dim">▲ ${esc(s.note)}</div>` : '';
-      const dlbtn = (!s.emu_found && !busy && s.dl === 'auto')
-        ? `<button class="filled" onclick="download('${s.id}')">DOWNLOAD ${esc(s.emu_name.toUpperCase())}</button>` : '';
+      if(s.emu_found) detail=`Using <b>${esc(s.emu_path)}</b>`;
+      else if(s.dl==='auto') detail=`Needs <b>${esc(s.emu_name)}</b> &mdash; click DOWNLOAD and
+        RetroShelf installs it into <b>${esc(s.emu_dir)}\\</b>, or get it from ${link}.`;
+      else detail=`Needs <b>${esc(s.emu_name)}</b> &mdash; download from ${link}
+        and unzip into <b>${esc(s.emu_dir)}\\</b>.`;
+      const note=s.note?`<div class="dim">▲ ${esc(s.note)}</div>`:'';
+      const dlbtn=(!s.emu_found&&!busy&&s.dl==='auto')
+        ?`<button class="filled" onclick="download('${s.id}')">DOWNLOAD ${esc(s.emu_name.toUpperCase())}</button>`:'';
       return `<div class="card">
         <div class="head">${sysLogo(s.id,22)}<span class="nm">${esc(s.name)}</span>${status}${err}</div>
         <div class="dim">${detail}<br>Game files: <b>${esc(s.exts.join(' '))}</b>
-          &middot; ${s.games.length} found</div>
-        ${note}
-        <div class="fields">
-          ${dlbtn}
+          &middot; ${s.games.length} found</div>${note}
+        <div class="fields">${dlbtn}
           <input class="cfg" id="ep-${s.id}" placeholder="custom emulator exe path (optional)"
-             value="${esc(s.emu_override)}">
-          <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}"
-             title="Placeholders: {emu} {rom} {romname} {romdir}">
+            value="${esc(s.emu_override)}">
+          <input class="cfg" id="ar-${s.id}" value="${esc(s.args)}">
           <button class="txt" onclick="saveSystem('${s.id}')">SAVE</button>
         </div></div>`;
     }).join('');
-
   } else {
-    count.textContent = '';
-    content.innerHTML = `<div class="card">
+    count.textContent='';
+    body.innerHTML=`<div class="card">
         <div class="head"><span class="nm">Folders</span></div>
-        <div class="flabel">GAMES FOLDER (scanned recursively, subfolders included)</div>
+        <div class="flabel">GAMES FOLDER (scanned recursively)</div>
         <div class="fields"><input class="cfg" id="root" value="${esc(state.library_root)}"></div>
-        <div class="flabel">EMULATORS FOLDER (one subfolder per system)</div>
+        <div class="flabel">EMULATORS FOLDER</div>
         <div class="fields"><input class="cfg" id="emuroot" value="${esc(state.emulators_root)}"></div>
-        <div class="flabel">ART FOLDER (covers + screenshots)</div>
+        <div class="flabel">ART FOLDER</div>
         <div class="fields"><input class="cfg" id="artroot" value="${esc(state.art_root)}"></div>
         <div class="fields">
           <button class="filled" onclick="saveSettings()">SAVE &amp; RESCAN</button>
           <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
         </div></div>
       <div class="card">
+        <div class="head"><span class="nm">Online art fetcher</span>${shotsStatus()}</div>
+        <div class="dim">Downloads missing screenshots (and any missing covers) from the
+          libretro thumbnail library, matched by title. Run it again any time &mdash;
+          it only fetches what's missing.</div>
+        <div class="fields">
+          <button class="filled" onclick="fetchShots()">FETCH SCREENSHOTS &amp; COVERS</button>
+        </div></div>
+      <div class="card">
         <div class="head"><span class="nm">Cover art matcher</span>${coverStatus()}</div>
-        <div class="dim">Point at a folder full of box-art images (any structure)
-          and RetroShelf matches them to your games by title and copies each one
-          into the art folder under the rom's exact name.</div>
+        <div class="dim">Matches a local folder of box art to your games by title and
+          copies each hit into the art folder.</div>
         <div class="flabel">COVERS SOURCE FOLDER</div>
         <div class="fields">
-          <input class="cfg" id="coversdir" value="${esc(state.covers_dir || '')}"
-             placeholder="e.g. M:\\oldgames\\covers">
+          <input class="cfg" id="coversdir" value="${esc(state.covers_dir||'')}"
+            placeholder="e.g. M:\\oldgames\\covers">
           <button class="filled" onclick="matchCovers()">MATCH COVERS</button>
         </div></div>
       <div class="card howto">
         <h3>HOW IT WORKS</h3>
-        RetroShelf scans the games folder recursively and works out each game's
-        system from its file extension, with folder names as hints
-        (a folder with "n64" or "amiga" in the name tips the balance for
-        ambiguous files like .zip / .iso / .bin / .rar).
-        <h3>EMULATORS</h3>
-        The SYSTEMS tab shows every system: one-click DOWNLOAD where the emulator
-        ships as a plain zip (fetched from its official releases), or a link to
-        the download page where it needs a manual install. Emulators land in
-        <code>emulators\\&lt;system&gt;\\</code> and the exe is found automatically.
+        RetroShelf scans the games folder recursively and works out each game's system
+        from its file extension, with folder names as hints.
+        <h3>CONTROLS</h3>
+        Click a game to select it, double-click (or the PLAY button) to launch.
+        With a controller: d-pad moves, <b>A</b> plays, <b>X</b> favourites,
+        <b>LB/RB</b> switch tabs, <b>Y</b> rescans. Xbox, PlayStation and generic
+        USB pads work; PS3 pads need the DsHidMini driver.
         <h3>ART</h3>
-        Covers: image named like the rom, next to it, or in
-        <code>art\\&lt;system&gt;\\</code>. Screenshots: same name in a
-        <code>screens\\</code> subfolder or <code>art\\&lt;system&gt;\\screens\\</code>.
-        <h3>CONTROLLERS</h3>
-        Plug in a pad and press any button — the indicator top-right lights up
-        and you can drive the whole launcher from the controller:
-        d-pad/stick to move, A to play, LB/RB to switch tab, Y to rescan.
-        Works with Xbox One/Series pads (native), PS4/PS5 pads, and any
-        DirectInput USB pad. PS3 pads need a Windows driver first (DsHidMini).
-        In-game controls are handled by each emulator &mdash; every bundled
-        emulator supports Xbox pads out of the box; check its input settings
-        to remap.
+        Covers: image named like the rom in <code>art\\&lt;system&gt;\\</code>.
+        Screenshots: same name in <code>art\\&lt;system&gt;\\screens\\</code>.
       </div>`;
   }
 }
 
-async function saveSystem(id) {
-  await fetch('/api/system', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({id: id,
-      emu_path: document.getElementById('ep-' + id).value,
-      args: document.getElementById('ar-' + id).value})});
-  snack('SAVED');
-  refresh();
-}
-
-async function saveSettings() {
-  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({
-      library_root: document.getElementById('root').value,
-      emulators_root: document.getElementById('emuroot').value,
-      art_root: document.getElementById('artroot').value})});
-  snack('SAVED - RESCANNING...');
-  refresh(true);
-}
-
-async function mkdirs() {
-  const r = await (await fetch('/api/mkdirs', {method:'POST',
-    headers:{'Content-Type':'application/json'}, body: '{}'})).json();
-  snack(r.ok ? 'FOLDERS CREATED' : r.msg);
-  refresh();
-}
-
-function coverStatus() {
-  const c = state.covers || {};
-  if (!c.status) return '';
-  if (c.status === 'indexing') return `<span class="pill dlp">INDEXING COVERS...</span>`;
-  if (c.status === 'matching')
-    return `<span class="pill dlp">MATCHING ${c.done||0}/${c.total||0} &middot; ${c.matched||0} FOUND</span>`;
-  if (c.status === 'error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
+function coverStatus(){
+  const c=state.covers||{};
+  if(!c.status) return '';
+  if(c.status==='indexing') return `<span class="pill dlp">INDEXING...</span>`;
+  if(c.status==='matching') return `<span class="pill dlp">MATCHING ${c.done||0}/${c.total||0} &middot; ${c.matched||0} FOUND</span>`;
+  if(c.status==='error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
   return `<span class="pill ok">DONE &middot; ${c.matched} MATCHED &middot; ${c.copied} COPIED</span>`;
 }
-
-let _covPoll = null;
-async function matchCovers() {
-  const dir = document.getElementById('coversdir').value.trim();
-  const r = await (await fetch('/api/matchcovers', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({dir: dir})})).json();
-  snack(r.ok ? 'MATCHING COVERS...' : 'ERROR: ' + r.msg);
-  if (r.ok && !_covPoll) {
-    _covPoll = setInterval(async () => {
+function shotsStatus(){
+  const c=state.shots||{};
+  if(!c.status) return '';
+  if(c.status==='indexing') return `<span class="pill dlp">INDEXING...</span>`;
+  if(c.status==='fetching') return `<span class="pill dlp">${esc(c.sys||'')} ${c.done||0}/${c.total||0} &middot; ${c.found||0} FETCHED</span>`;
+  if(c.status==='error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
+  return `<span class="pill ok">DONE &middot; ${c.found} IMAGES FETCHED</span>`;
+}
+let _shotPoll=null;
+async function fetchShots(){
+  const r=await (await fetch('/api/fetchshots',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  snack(r.ok?'FETCHING ART FROM LIBRETRO...':'ERROR: '+r.msg);
+  if(r.ok&&!_shotPoll){
+    _shotPoll=setInterval(async()=>{
       await refresh();
-      const st = (state.covers || {}).status;
-      if (st !== 'indexing' && st !== 'matching') {
-        clearInterval(_covPoll); _covPoll = null;
-        snack(st === 'done'
-          ? 'COVERS: ' + state.covers.matched + ' MATCHED, ' + state.covers.copied + ' COPIED'
-          : 'COVERS ERROR: ' + (state.covers.msg || ''));
-        refresh(true);
-      }
-    }, 1500);
+      const st=(state.shots||{}).status;
+      if(st!=='indexing'&&st!=='fetching'){ clearInterval(_shotPoll); _shotPoll=null;
+        snack(st==='done'?'ART FETCH DONE: '+state.shots.found+' IMAGES'
+          :'ART FETCH ERROR: '+(state.shots.msg||'')); refresh(true); }
+    },1500);
   }
 }
+let _covPoll=null;
+async function matchCovers(){
+  const dir=document.getElementById('coversdir').value.trim();
+  const r=await (await fetch('/api/matchcovers',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({dir:dir})})).json();
+  snack(r.ok?'MATCHING COVERS...':'ERROR: '+r.msg);
+  if(r.ok&&!_covPoll){
+    _covPoll=setInterval(async()=>{
+      await refresh();
+      const st=(state.covers||{}).status;
+      if(st!=='indexing'&&st!=='matching'){ clearInterval(_covPoll); _covPoll=null;
+        snack(st==='done'?'COVERS: '+state.covers.matched+' MATCHED':'COVERS ERROR');
+        refresh(true); }
+    },1500);
+  }
+}
+let _poll=null;
+function pollDownloads(){
+  if(_poll) return;
+  _poll=setInterval(async()=>{
+    await refresh();
+    const act=Object.values(state.downloads||{})
+      .some(d=>['resolving','downloading','extracting'].includes(d.status));
+    if(!act){ clearInterval(_poll); _poll=null; refresh(); }
+  },1200);
+}
+async function download(id){
+  const r=await (await fetch('/api/download',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})).json();
+  snack(r.ok?'DOWNLOADING '+sysLabel(id)+' EMULATOR':'ERROR: '+r.msg);
+  if(r.ok) pollDownloads();
+}
+async function saveSystem(id){
+  await fetch('/api/system',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:id,emu_path:document.getElementById('ep-'+id).value,
+      args:document.getElementById('ar-'+id).value})});
+  snack('SAVED'); refresh();
+}
+async function saveSettings(){
+  await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({library_root:document.getElementById('root').value,
+      emulators_root:document.getElementById('emuroot').value,
+      art_root:document.getElementById('artroot').value})});
+  snack('SAVED - RESCANNING...'); refresh(true);
+}
+async function mkdirs(){
+  const r=await (await fetch('/api/mkdirs',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  snack(r.ok?'FOLDERS CREATED':r.msg); refresh();
+}
 
-/* ---- controller support (Gamepad API: Xbox, PlayStation, generic pads) ---- */
-let gpIndex = 0;
-const gpState = {last: {}, heldDir: null, lastMove: 0, fast: false, known: {}};
-const TABS = ['games', 'systems', 'settings'];
+/* ---------- keyboard ---------- */
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(tab!=='games') return;
+  const cols=gridCols();
+  let i=curGame?curList.findIndex(g=>g.file===curGame.file):-1;
+  if(e.key==='ArrowRight'){ move(1); e.preventDefault(); }
+  else if(e.key==='ArrowLeft'){ move(-1); e.preventDefault(); }
+  else if(e.key==='ArrowDown'){ move(view==='grid'?cols:1); e.preventDefault(); }
+  else if(e.key==='ArrowUp'){ move(view==='grid'?-cols:-1); e.preventDefault(); }
+  else if(e.key==='Enter'){ if(i>=0) playIdx(i); }
+  else if(e.key==='f'||e.key==='F'){ toggleFav(); }
+});
+function gridCols(){
+  const g=document.getElementById('grid');
+  if(!g) return 1;
+  return Math.max(1,Math.round(g.clientWidth/(g.firstElementChild?
+    g.firstElementChild.offsetWidth+16:164)));
+}
+function move(d){
+  if(!curList.length) return;
+  let i=curGame?curList.findIndex(g=>g.file===curGame.file):-1;
+  i=Math.max(0,Math.min(curList.length-1,(i<0?0:i+d)));
+  if(i>=shown-1&&shown<curList.length){ shown+=300; render(); }
+  pick(i);
+  const el=document.querySelector('.tile[data-i="'+i+'"],.row[data-i="'+i+'"]');
+  if(el) el.scrollIntoView({block:'nearest'});
+}
 
-function padName(id) {
-  const s = (id || '').toLowerCase();
-  if (s.includes('xbox') || s.includes('xinput')) return 'Xbox controller';
-  if (s.includes('054c') || s.includes('sony') || s.includes('dualshock') ||
-      s.includes('dualsense') || s.includes('playstation')) return 'PlayStation controller';
+/* ---------- controller ---------- */
+const gpState={last:{},heldDir:null,lastMove:0,fast:false,known:{}};
+const TABS=['games','systems','settings'];
+function padName(id){
+  const s=(id||'').toLowerCase();
+  if(s.includes('xbox')||s.includes('xinput')) return 'Xbox controller';
+  if(s.includes('054c')||s.includes('sony')||s.includes('dualshock')||
+     s.includes('dualsense')||s.includes('playstation')) return 'PlayStation controller';
   return 'Controller';
 }
-
-function activePad() {
-  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
-  for (const g of gps) if (g && g.connected) return g;
+function activePad(){
+  const gps=navigator.getGamepads?navigator.getGamepads():[];
+  for(const g of gps) if(g&&g.connected) return g;
   return null;
 }
-
-function updatePadBadge(gp) {
-  const b = document.getElementById('padbadge');
-  const hint = document.getElementById('gphint');
-  if (gp) {
-    b.classList.add('on');
-    b.title = padName(gp.id) + ' connected — ' + gp.id;
-    hint.style.display = 'block';
-  } else {
-    b.classList.remove('on');
-    b.title = 'No controller — press any button on the pad';
-    hint.style.display = 'none';
-  }
+function updatePadBadge(gp){
+  const b=document.getElementById('padbadge'), hint=document.getElementById('gphint');
+  if(gp){ b.classList.add('on'); b.title=padName(gp.id)+' — '+gp.id; hint.style.display='block'; }
+  else { b.classList.remove('on'); b.title='No controller'; hint.style.display='none'; }
 }
-
-window.addEventListener('gamepadconnected', e => {
-  gpState.known[e.gamepad.index] = true;
-  updatePadBadge(e.gamepad);
-  snack(padName(e.gamepad.id).toUpperCase() + ' CONNECTED');
+window.addEventListener('gamepadconnected',e=>{
+  gpState.known[e.gamepad.index]=true; updatePadBadge(e.gamepad);
+  snack(padName(e.gamepad.id).toUpperCase()+' CONNECTED');
 });
-window.addEventListener('gamepaddisconnected', e => {
+window.addEventListener('gamepaddisconnected',e=>{
   delete gpState.known[e.gamepad.index];
-  const gp = activePad();
-  updatePadBadge(gp);
-  if (!gp) snack('CONTROLLER DISCONNECTED');
+  const gp=activePad(); updatePadBadge(gp);
+  if(!gp) snack('CONTROLLER DISCONNECTED');
 });
-
-function applyGpSel(scroll) {
-  const rows = document.querySelectorAll('.row');
-  if (!rows.length) return;
-  gpIndex = Math.max(0, Math.min(gpIndex, rows.length - 1));
-  rows.forEach(r => r.classList.remove('gpsel'));
-  rows[gpIndex].classList.add('gpsel');
-  if (scroll) rows[gpIndex].scrollIntoView({block: 'center'});
-}
-
-function moveSel(dy) {
-  if (tab !== 'games') return;
-  gpIndex += dy;
-  applyGpSel(true);
-}
-
-function moveChip(dx) {
-  if (tab !== 'games') return;
-  const ids = ['all'].concat(state.systems.filter(s => s.games.length).map(s => s.id));
-  let i = ids.indexOf(sel) + dx;
-  i = (i + ids.length) % ids.length;
-  sel = ids[i];
-  gpIndex = 0;
-  shown = 400;
-  render();
-  applyGpSel(true);
-}
-
-function activateSel() {
-  if (tab !== 'games') return;
-  const rows = document.querySelectorAll('.row');
-  if (rows[gpIndex]) rows[gpIndex].click();
-}
-
-function cycleTab(d) {
-  let i = (TABS.indexOf(tab) + d + TABS.length) % TABS.length;
-  setTab(TABS[i]);
-  if (tab === 'games') applyGpSel(false);
-}
-
-function pollPads() {
+function cycleTab(d){ setTab(TABS[(TABS.indexOf(tab)+d+TABS.length)%TABS.length]); }
+function pollPads(){
   requestAnimationFrame(pollPads);
-  const gp = activePad();
-  if (!gp) return;
-  if (!gpState.known[gp.index]) {         // pad was connected before page load
-    gpState.known[gp.index] = true;
-    updatePadBadge(gp);
-  }
-  const now = performance.now();
-  const btn = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
-  const ax = i => gp.axes[i] || 0;
-  const pressed = {};
-  for (const i of [0, 1, 3, 4, 5]) {
-    pressed[i] = btn(i) && !gpState.last[i];
-    gpState.last[i] = btn(i);
-  }
-  let dy = 0, dx = 0;
-  if (btn(12) || ax(1) < -0.5) dy = -1;
-  else if (btn(13) || ax(1) > 0.5) dy = 1;
-  if (btn(14) || ax(0) < -0.5) dx = -1;
-  else if (btn(15) || ax(0) > 0.5) dx = 1;
-  if (dy || dx) {
-    const dir = dx + ',' + dy;
-    const first = gpState.heldDir !== dir;
-    if (first || now - gpState.lastMove > (gpState.fast ? 90 : 320)) {
-      if (!first) gpState.fast = true;
-      gpState.heldDir = dir;
-      gpState.lastMove = now;
-      if (dy) moveSel(dy);
-      if (dx) moveChip(dx);
+  const gp=activePad(); if(!gp) return;
+  if(!gpState.known[gp.index]){ gpState.known[gp.index]=true; updatePadBadge(gp); }
+  const now=performance.now();
+  const btn=i=>!!(gp.buttons[i]&&gp.buttons[i].pressed);
+  const ax=i=>gp.axes[i]||0;
+  const pressed={};
+  for(const i of [0,1,2,3,4,5]){ pressed[i]=btn(i)&&!gpState.last[i]; gpState.last[i]=btn(i); }
+  let dy=0,dx=0;
+  if(btn(12)||ax(1)<-0.5) dy=-1; else if(btn(13)||ax(1)>0.5) dy=1;
+  if(btn(14)||ax(0)<-0.5) dx=-1; else if(btn(15)||ax(0)>0.5) dx=1;
+  if((dy||dx)&&tab==='games'){
+    const dir=dx+','+dy, first=gpState.heldDir!==dir;
+    if(first||now-gpState.lastMove>(gpState.fast?90:320)){
+      if(!first) gpState.fast=true;
+      gpState.heldDir=dir; gpState.lastMove=now;
+      const cols=view==='grid'?gridCols():1;
+      if(dy) move(dy*(view==='grid'?cols:1));
+      if(dx) move(dx);
     }
-  } else {
-    gpState.heldDir = null;
-    gpState.fast = false;
+  } else if(!dy&&!dx){ gpState.heldDir=null; gpState.fast=false; }
+  if(pressed[0]&&tab==='games'){
+    const i=curGame?curList.findIndex(g=>g.file===curGame.file):-1;
+    if(i>=0) playIdx(i);
   }
-  if (pressed[0]) activateSel();                                  // A / Cross
-  if (pressed[1]) { gpIndex = 0; applyGpSel(true); }              // B / Circle
-  if (pressed[3]) { snack('RESCANNING...'); refresh(true); }      // Y / Triangle
-  if (pressed[4]) cycleTab(-1);                                   // LB / L1
-  if (pressed[5]) cycleTab(1);                                    // RB / R1
+  if(pressed[2]) toggleFav();
+  if(pressed[3]){ snack('RESCANNING...'); refresh(true); }
+  if(pressed[4]) cycleTab(-1);
+  if(pressed[5]) cycleTab(1);
 }
 pollPads();
-
 refresh();
 </script>
 </body>
