@@ -2203,7 +2203,7 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
 .logo { display: flex; align-items: flex-end; gap: 4px; white-space: nowrap;
   cursor: pointer; user-select: none; overflow: hidden; }
 .logo pre { margin: 0; font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 6.5px; line-height: 1.05; font-weight: 700; letter-spacing: 0;
+  font-size: 8.5px; line-height: 1.05; font-weight: 700; letter-spacing: 0;
   background: linear-gradient(100deg, #6b5000 0%, var(--amber) 22%,
     #fff3cf 32%, var(--amber2) 42%, var(--amber) 60%, #6b5000 100%);
   background-size: 260% 100%;
@@ -2215,8 +2215,8 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
   to { background-position-x: -60%; } }
 .logo .cur { color: var(--amber); font-size: 15px; line-height: 1.6;
   animation: blink 1.1s steps(1) infinite; text-shadow: 0 0 10px rgba(255,176,0,.7); }
-@media (max-width: 1400px) { .logo pre { font-size: 5px; } }
-@media (max-width: 1100px) { .logo { display: none; } }
+@media (max-width: 1500px) { .logo pre { font-size: 6.5px; } }
+@media (max-width: 1150px) { .logo { display: none; } }
 .searchwrap { flex: 1; max-width: 460px; position: relative; }
 .searchwrap::before { content: ">"; position: absolute; left: 14px; top: 4px;
   color: var(--dim); font-size: 22px; }
