@@ -20,6 +20,7 @@ Run:  python retroshelf.py          (opens browser)
 
 import concurrent.futures
 import difflib
+import functools
 import json
 import mimetypes
 import os
@@ -263,9 +264,23 @@ def save_config(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
+_emu_cache = {}
+
+
 def find_emulator(sysdef, cfg):
-    """Return Path to the emulator exe, or None."""
+    """Return Path to the emulator exe, or None. Cached - scanning emulator
+    folders (RetroArch alone has thousands of files) on every request is slow."""
     override = cfg["overrides"].get(sysdef["id"], {}).get("emu_path", "")
+    key = (sysdef["id"], cfg["emulators_root"], override)
+    hit = _emu_cache.get(key)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    found = _find_emulator_uncached(sysdef, cfg, override)
+    _emu_cache[key] = (time.time(), found)
+    return found
+
+
+def _find_emulator_uncached(sysdef, cfg, override):
     if override:
         p = Path(override)
         return p if p.is_file() else None
@@ -398,10 +413,37 @@ def scan_all(cfg):
                     return True
         return False
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not skip_dir(d)]
-        if any(skip_dir(part) for part in Path(dirpath).parts):
-            continue
+    def walk(top):
+        """os.walk, but yielding DirEntry objects - their stat data is already
+        cached by the OS, so file sizes cost nothing extra."""
+        stack = [top]
+        while stack:
+            here = stack.pop()
+            try:
+                with os.scandir(here) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            files = []
+            for e in entries:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if not skip_dir(e.name):
+                            stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        files.append(e)
+                except OSError:
+                    continue
+            yield here, files
+
+    for dirpath, entries in walk(str(root)):
+        filenames = [e.name for e in entries]
+        sizes = {}
+        for e in entries:
+            try:
+                sizes[e.name] = e.stat().st_size
+            except OSError:
+                sizes[e.name] = 0
         dp = Path(dirpath)
         try:
             rel_parts = dp.relative_to(root).parts
@@ -418,14 +460,10 @@ def scan_all(cfg):
             sysid = classify(rel_parts, ext, p)
             if not sysid:
                 continue
-            try:
-                size = p.stat().st_size
-            except OSError:
-                size = 0
             games[sysid].append({
                 "name": clean_name(stem),
                 "file": str(p),
-                "size": size,
+                "size": sizes.get(fname, 0),
                 "art": has_art(sysid, dp, stem, "cover"),
                 "shot": has_art(sysid, dp, stem, "screen"),
             })
@@ -447,6 +485,24 @@ def get_games(cfg, force=False):
     data = scan_all(cfg)
     _scan_cache.update(key=key, time=now, data=data)
     return data
+
+
+_scan_busy = threading.Event()
+
+
+def request_rescan(cfg):
+    """Rescan in the background so the UI never waits on a slow drive."""
+    if _scan_busy.is_set():
+        return
+    def work():
+        _scan_busy.set()
+        try:
+            get_games(cfg, force=True)
+            _scan_cache["version"] += 1
+            _art_cache.clear()
+        finally:
+            _scan_busy.clear()
+    threading.Thread(target=work, daemon=True).start()
 
 
 def library_signature(root):
@@ -494,7 +550,22 @@ def _watch_worker():
             continue
 
 
+_art_cache = {}
+
+
 def find_art(sysdef, rom_path, cfg, kind="cover"):
+    key = (sysdef["id"], str(rom_path), kind)
+    hit = _art_cache.get(key, False)
+    if hit is not False:
+        return hit
+    p = _find_art_uncached(sysdef, rom_path, cfg, kind)
+    if len(_art_cache) > 20000:
+        _art_cache.clear()
+    _art_cache[key] = p
+    return p
+
+
+def _find_art_uncached(sysdef, rom_path, cfg, kind="cover"):
     stem = rom_path.stem
     if kind == "screen":
         dirs = [rom_path.parent / "screens", rom_path.parent / "screenshots",
@@ -603,6 +674,7 @@ def _download_worker(sysdef, emulators_root):
                         break
                 target = base / sub
             _fetch_and_extract(sysid, part, target)
+        _emu_cache.clear()
         _set_dl(sysid, status="done", msg="installed")
     except Exception as e:  # report any failure to the UI
         _set_dl(sysid, status="error", msg=str(e))
@@ -636,6 +708,7 @@ _ROMAN = [("viii", "8"), ("vii", "7"), ("iii", "3"), ("vi", "6"),
           ("iv", "4"), ("ix", "9"), ("ii", "2")]
 
 
+@functools.lru_cache(maxsize=40000)
 def norm_title(s):
     """Normalise a title for matching: drop tags/punctuation, split camelcase."""
     s = TAG_RE.sub("", s)
@@ -919,6 +992,7 @@ def _shots_worker(cfg):
                         _set_shots(done=done, found=found)
 
         _scan_cache["time"] = 0
+        _art_cache.clear()
         _set_shots(status="done", done=done, found=found, sys="")
     except Exception as e:
         _set_shots(status="error", msg=str(e))
@@ -1422,11 +1496,12 @@ def collapse_versions(gl):
         name = Path(g["file"]).name
         m = DISCNUM_RE.search(name)
         low = name.lower()
-        # start at disc 1, skip demos/betas when a full release exists,
-        # then prefer the biggest file
+        # disc 1 first, then full releases over demos/betas, then USA/Europe
+        # releases, and finally the biggest file
         partial = any(w in low for w in
                       ("demo", "beta", "proto", "sample", "not for resale"))
-        return (int(m.group(1)) if m else 0, partial, -g.get("size", 0))
+        return (int(m.group(1)) if m else 0, partial,
+                _region_rank(name), -g.get("size", 0))
 
     out = []
     for key in order:
@@ -1454,7 +1529,9 @@ def collapse_versions(gl):
 
 
 def build_state(cfg, rescan=False):
-    games = get_games(cfg, force=rescan)
+    if rescan:
+        request_rescan(cfg)
+    games = get_games(cfg)
     systems = []
     for sysdef in SYSTEMS:
         emu = find_emulator(sysdef, cfg)
@@ -1509,6 +1586,7 @@ def build_state(cfg, rescan=False):
     return {
         "meta": meta,
         "version": _scan_cache["version"],
+        "scanning": _scan_busy.is_set(),
         "cache_size": cache_size(cfg),
         "library_root": cfg["library_root"],
         "emulators_root": cfg["emulators_root"],
@@ -1583,8 +1661,15 @@ def sync_bios(cfg, sysid, emu):
 # Nothing is ever deleted outright: chosen files are moved to a quarantine
 # folder so a mistake can be undone by dragging them back.
 DISC_RE = re.compile(r"\(\s*(?:disc|disk|cd)\s*\d+", re.I)
-REGION_RANK = [("(usa", 0), ("(us)", 0), ("(world", 1), ("(europe", 2),
-               ("(eu)", 2), ("(japan", 3), ("(korea", 4)]
+# English releases first, then untagged files, then everything else
+REGION_RANK = [("usa", 0), ("(us)", 0), ("(u)", 0), ("(us,", 0),
+               ("world", 1), ("canada", 1),
+               ("europe", 2), ("(eu)", 2), ("(e)", 2), ("(eu,", 2),
+               ("australia", 2),
+               ("japan", 4), ("(j)", 4), ("korea", 5), ("germany", 5),
+               ("france", 5), ("italy", 5), ("spain", 5), ("brazil", 5),
+               ("china", 5), ("taiwan", 5)]
+NO_REGION_RANK = 3      # an untagged file is usually the main copy
 
 
 def _region_rank(name):
@@ -1592,7 +1677,7 @@ def _region_rank(name):
     for tag, rank in REGION_RANK:
         if tag in n:
             return rank
-    return 5
+    return NO_REGION_RANK
 
 
 def find_dupes(cfg):
@@ -1747,16 +1832,25 @@ def cache_dir(cfg, sysid):
     return d
 
 
+_cache_size = {"time": 0.0, "bytes": 0}
+
+
 def cache_size(cfg):
+    """Size of the unpacked-disc cache, remembered for a minute - walking it
+    on every state request would stall the UI."""
+    now = time.time()
+    if now - _cache_size["time"] < 60:
+        return _cache_size["bytes"]
     root = Path(cfg["emulators_root"]).parent / "cache"
     total = 0
     if root.is_dir():
-        for p in root.rglob("*"):
-            try:
-                if p.is_file():
-                    total += p.stat().st_size
-            except OSError:
-                pass
+        for _dir, _sub, files in os.walk(root):
+            for f in files:
+                try:
+                    total += os.stat(os.path.join(_dir, f)).st_size
+                except OSError:
+                    pass
+    _cache_size.update(time=now, bytes=total)
     return total
 
 
@@ -2106,19 +2200,23 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
 header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid var(--line);
   box-shadow: 0 4px 18px rgba(0,0,0,.5); position: relative; z-index: 12; }
 .bar { display: flex; align-items: center; gap: 22px; padding: 10px 20px 8px; }
-.logo { display: flex; align-items: flex-end; gap: 6px; white-space: nowrap;
-  cursor: pointer; user-select: none; }
+.logo { display: flex; align-items: flex-end; gap: 4px; white-space: nowrap;
+  cursor: pointer; user-select: none; overflow: hidden; }
 .logo pre { margin: 0; font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 11px; line-height: 1.12; font-weight: 700;
-  background: linear-gradient(90deg, #7a5c00, var(--amber) 28%, var(--amber2) 50%,
-    var(--amber) 72%, #7a5c00);
-  background-size: 200% 100%;
+  font-size: 6.5px; line-height: 1.05; font-weight: 700; letter-spacing: 0;
+  background: linear-gradient(100deg, #6b5000 0%, var(--amber) 22%,
+    #fff3cf 32%, var(--amber2) 42%, var(--amber) 60%, #6b5000 100%);
+  background-size: 260% 100%;
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: shimmer 4.5s linear infinite;
-  filter: drop-shadow(0 0 7px rgba(255,176,0,.55)); }
-@keyframes shimmer { to { background-position-x: -200%; } }
-.logo .cur { color: var(--amber); font-size: 17px; line-height: 1;
+  animation: shimmer 5s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(255,176,0,.5)); }
+@keyframes shimmer {
+  from { background-position-x: 260%; }
+  to { background-position-x: -60%; } }
+.logo .cur { color: var(--amber); font-size: 15px; line-height: 1.6;
   animation: blink 1.1s steps(1) infinite; text-shadow: 0 0 10px rgba(255,176,0,.7); }
+@media (max-width: 1400px) { .logo pre { font-size: 5px; } }
+@media (max-width: 1100px) { .logo { display: none; } }
 .searchwrap { flex: 1; max-width: 460px; position: relative; }
 .searchwrap::before { content: ">"; position: absolute; left: 14px; top: 4px;
   color: var(--dim); font-size: 22px; }
@@ -2368,9 +2466,13 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 <div id="stars"></div>
 <header>
   <div class="bar">
-    <div class="logo" onclick="setTab('games')"><pre>
-█▀█ █▀▀ ▀█▀ █▀█ █▀█ █▀▀ █ █ █▀▀ █   █▀▀
-█▀▄ ██▄  █  █▀▄ █▄█ ▄▄█ █▀█ ██▄ █▄▄ █▀ </pre><span class="cur">▮</span></div>
+    <div class="logo" onclick="setTab('games')"><pre>  _______    _______  ___________  _______     ______    ________  __    __    _______  ___       _______
+ /"      \  /"     "|("     _   ")/"      \   /    " \  /"       )/" |  | "\  /"     "||"  |     /"     "|
+|:        |(: ______) )__/  \\__/|:        | // ____  \(:   \___/(:  (__)  :)(: ______)||  |    (: ______)
+|_____/   ) \/    |      \\_ /   |_____/   )/  /    ) :)\___  \   \/      \/  \/    |  |:  |     \/    |
+ //      /  // ___)_     |.  |    //      /(: (____/ //  __/  \\  //  __  \\  // ___)_  \  |___  // ___)
+|:  __   \ (:      "|    \:  |   |:  __   \ \        /  /" \   :)(:  (  )  :)(:      "|( \_|:  \(:  (
+|__|  \___) \_______)     \__|   |__|  \___) \"_____/  (_______/  \__|  |__/  \_______) \_______)\__/      </pre><span class="cur">▮</span></div>
     <div class="searchwrap">
       <input id="search" placeholder="search games..." oninput="onSearch()" autocomplete="off">
     </div>
