@@ -474,8 +474,16 @@ def _watch_worker():
                 continue
             if last is not None and sig != last:
                 _scan_cache["time"] = 0            # force a rescan next request
-                get_games(cfg, force=True)
+                games = get_games(cfg, force=True)
                 _scan_cache["version"] += 1
+                # newly added games usually have no art yet - go and get it
+                missing = any(not g["art"] or not g["shot"]
+                              for sysid, lst in games.items()
+                              if sysid in LIBRETRO_SYS for g in lst)
+                if missing and SHOTS.get("status") not in ("indexing", "fetching"):
+                    time.sleep(10)      # let a bulk copy finish first
+                    if library_signature(cfg["library_root"]) == sig:
+                        start_shots(cfg)
             last = sig
         except Exception:
             continue
@@ -768,6 +776,22 @@ def _libretro_index(sysdir, kind):
     return exact, nospace, byletter
 
 
+def loose_key(key, keys):
+    """Last-resort title match for subtitle or publisher-prefix differences,
+    e.g. "SnowJob" -> "SnowJob Starring Tracy Scoggins", or
+    "Over Drivin'" -> "Road & Track Presents - OverDrivin'".
+    Short titles are skipped so things like "D" cannot match everything."""
+    if len(key) < 6:
+        return None
+    # prefix match, but only on a whole-word boundary ("snowjob starring ...")
+    cands = [k for k in keys
+             if k.startswith(key + " ") or (len(k) >= 6 and key.startswith(k + " "))]
+    ks = key.replace(" ", "")
+    if not cands and len(ks) >= 7:
+        cands = [k for k in keys if len(k) >= 7 and ks in k.replace(" ", "")]
+    return min(cands, key=len) if cands else None
+
+
 def _libretro_match(key, index):
     exact, nospace, byletter = index
     hit = exact.get(key) or nospace.get(key.replace(" ", ""))
@@ -776,6 +800,10 @@ def _libretro_match(key, index):
                                           n=1, cutoff=0.87)
         if close:
             hit = exact[close[0]]
+    if not hit:
+        alt = loose_key(key, exact.keys())
+        if alt:
+            hit = exact[alt]
     return hit
 
 
@@ -994,7 +1022,10 @@ def meta_lookup(sysid, name):
         if alt:
             return idx[alt]
     close = difflib.get_close_matches(key, keys, n=1, cutoff=0.9)
-    return idx[close[0]] if close else None
+    if close:
+        return idx[close[0]]
+    alt = loose_key(key, keys)
+    return idx[alt] if alt else None
 
 
 def meta_have():
