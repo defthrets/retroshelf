@@ -66,14 +66,18 @@ Custom exe paths and launch-argument templates (placeholders `{emu}` `{rom}`
 ## Building the exe
 
 ```
-python -m pip install pyinstaller pillow
+python -m pip install pyinstaller pillow pywebview
 python make_icon.py                       # generates retroshelf.ico
 python -m PyInstaller --onefile --noconsole --icon retroshelf.ico ^
+       --collect-all webview ^
        --name RetroShelf retroshelf.py    # -> dist\RetroShelf.exe
 ```
 
-The exe keeps its config (`retroshelf.json`) next to itself. Double-clicking
-it while it's already running just opens the browser tab again.
+The exe opens in its own native window (Edge WebView2) with the cartridge
+icon — run with `--browser` to use a browser tab instead, or `--no-browser`
+for server-only. Config (`retroshelf.json`) lives next to the exe.
+Double-clicking while it's already running opens another window on the same
+instance.
 
 ## Notes
 
