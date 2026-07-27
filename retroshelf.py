@@ -528,7 +528,9 @@ def norm_title(s):
     """Normalise a title for matching: drop tags/punctuation, split camelcase."""
     s = TAG_RE.sub("", s)
     s = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", s)
-    s = _norm_re.sub(" ", s.lower()).strip()
+    s = s.lower()
+    s = re.sub(r",\s*(the|a|an)\b", "", s)      # "Zelda, The" -> "Zelda"
+    s = _norm_re.sub(" ", s).strip()
     if s.startswith("the "):
         s = s[4:]
     for rom, num in _ROMAN:   # Alien Breed II <-> Alien Breed 2
@@ -746,6 +748,156 @@ def start_shots(cfg):
         return True, "already fetching"
     threading.Thread(target=_shots_worker, args=(cfg,), daemon=True).start()
     return True, "fetching started"
+
+
+# --- game descriptions (LaunchBox Games Database dump) -----------------------
+
+LB_META_URL = "https://gamesdb.launchbox-app.com/Metadata.zip"
+LB_PLATFORM = {
+    "nes": "Nintendo Entertainment System",
+    "snes": "Super Nintendo Entertainment System",
+    "n64": "Nintendo 64",
+    "gb": "Nintendo Game Boy",
+    "gba": "Nintendo Game Boy Advance",
+    "nds": "Nintendo DS",
+    "gamecube": "Nintendo GameCube",
+    "wii": "Nintendo Wii",
+    "genesis": "Sega Genesis",
+    "dreamcast": "Sega Dreamcast",
+    "ps1": "Sony Playstation",
+    "ps2": "Sony Playstation 2",
+    "psp": "Sony PSP",
+    "arcade": "Arcade",
+    "atari2600": "Atari 2600",
+    "c64": "Commodore 64",
+    "amiga": "Commodore Amiga",
+}
+LB_EXTRA = {"gb": ["Nintendo Game Boy Color"],
+            "amiga": ["Commodore Amiga CD32"]}
+
+META = {}
+_meta_lock = threading.Lock()
+_meta_index = {}       # sysid -> {normkey: dict}
+
+
+def _meta_dir():
+    d = APP_DIR / "metadata"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _set_meta(**kw):
+    with _meta_lock:
+        META.update(kw)
+
+
+def _meta_worker():
+    try:
+        _set_meta(status="downloading", pct=0, games=0, msg="")
+        zpath = _meta_dir() / "_Metadata.zip"
+        req = urllib.request.Request(LB_META_URL, headers={"User-Agent": "RetroShelf"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(zpath, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                chunk = r.read(1 << 18)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if total:
+                    _set_meta(pct=int(got * 100 / total))
+        _set_meta(status="parsing", pct=100)
+
+        wanted = {}
+        for sysid, plat in LB_PLATFORM.items():
+            wanted[plat.lower()] = sysid
+            for alt in LB_EXTRA.get(sysid, []):
+                wanted[alt.lower()] = sysid
+        out = {s: {} for s in LB_PLATFORM}
+        import xml.etree.ElementTree as ET
+        kept = 0
+        with zipfile.ZipFile(zpath) as z, z.open("Metadata.xml") as f:
+            for _ev, el in ET.iterparse(f, events=("end",)):
+                if el.tag != "Game":
+                    continue
+                sysid = wanted.get((el.findtext("Platform") or "").lower())
+                if sysid:
+                    name = el.findtext("Name") or ""
+                    key = norm_title(name)
+                    if key and key not in out[sysid]:
+                        date = el.findtext("ReleaseDate") or ""
+                        rec = {
+                            "ov": (el.findtext("Overview") or "").strip(),
+                            "dev": el.findtext("Developer") or "",
+                            "pub": el.findtext("Publisher") or "",
+                            "gen": el.findtext("Genres") or "",
+                            "yr": el.findtext("ReleaseYear") or (date[:4] if date else ""),
+                            "pl": el.findtext("MaxPlayers") or "",
+                            "rt": el.findtext("CommunityRating") or "",
+                            "esrb": el.findtext("ESRB") or "",
+                        }
+                        if any(rec.values()):
+                            out[sysid][key] = rec
+                            kept += 1
+                            if kept % 2000 == 0:
+                                _set_meta(games=kept)
+                el.clear()
+        for sysid, d in out.items():
+            if d:
+                (_meta_dir() / (sysid + ".json")).write_text(
+                    json.dumps(d, separators=(",", ":")), encoding="utf-8")
+        with _meta_lock:
+            _meta_index.clear()
+        zpath.unlink(missing_ok=True)
+        _set_meta(status="done", games=kept)
+    except Exception as e:
+        _set_meta(status="error", msg=str(e))
+
+
+def start_meta():
+    if META.get("status") in ("downloading", "parsing"):
+        return True, "already running"
+    threading.Thread(target=_meta_worker, daemon=True).start()
+    return True, "metadata download started"
+
+
+def _tokkey(s):
+    return " ".join(sorted(s.split()))
+
+
+def meta_lookup(sysid, name):
+    with _meta_lock:
+        entry = _meta_index.get(sysid)
+    if entry is None:
+        p = _meta_dir() / (sysid + ".json")
+        try:
+            idx = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            idx = {}
+        # secondary indexes: no-space and token-order-insensitive
+        nospace, toks = {}, {}
+        for k in idx:
+            nospace.setdefault(k.replace(" ", ""), k)
+            toks.setdefault(_tokkey(k), k)
+        entry = (idx, nospace, toks, list(idx.keys()))
+        with _meta_lock:
+            _meta_index[sysid] = entry
+    idx, nospace, toks, keys = entry
+    if not idx:
+        return None
+    key = norm_title(name)
+    if key in idx:
+        return idx[key]
+    for alt in (nospace.get(key.replace(" ", "")), toks.get(_tokkey(key))):
+        if alt:
+            return idx[alt]
+    close = difflib.get_close_matches(key, keys, n=1, cutoff=0.9)
+    return idx[close[0]] if close else None
+
+
+def meta_have():
+    return sorted(p.stem for p in _meta_dir().glob("*.json"))
 
 
 # --- Amiga WHDLoad launching -------------------------------------------------
@@ -1011,7 +1163,11 @@ def build_state(cfg, rescan=False):
         covers = dict(COVERS)
     with _shots_lock:
         shots = dict(SHOTS)
+    with _meta_lock:
+        meta = dict(META)
+    meta["have"] = meta_have()
     return {
+        "meta": meta,
         "library_root": cfg["library_root"],
         "emulators_root": cfg["emulators_root"],
         "art_root": cfg["art_root"],
@@ -1110,6 +1266,10 @@ class Handler(BaseHTTPRequestHandler):
                 info["mtime"] = int(st.st_mtime)
             except OSError:
                 pass
+            sysid = qs.get("system", [""])[0]
+            name = qs.get("name", [""])[0]
+            if sysid and name:
+                info["meta"] = meta_lookup(sysid, name)
             self._json(info)
         elif parsed.path == "/api/art":
             qs = urllib.parse.parse_qs(parsed.query)
@@ -1162,6 +1322,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "msg": "saved"})
             elif parsed.path == "/api/fetchshots":
                 ok, msg = start_shots(cfg)
+                self._json({"ok": ok, "msg": msg})
+            elif parsed.path == "/api/fetchmeta":
+                ok, msg = start_meta()
                 self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/matchcovers":
                 covers_dir = body.get("dir", "").strip() or cfg.get("covers_dir", "")
@@ -1438,6 +1601,16 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
 .dshot-ph { width: 100%; aspect-ratio: 4/3; border-radius: 4px;
   border: 1px dashed var(--line); display: flex; align-items: center;
   justify-content: center; color: var(--muted); font-size: 16px; margin-bottom: 14px; }
+.overview { font-size: 18px; color: var(--text); line-height: 1.45; margin-bottom: 12px;
+  white-space: pre-wrap; }
+.overview.clip { display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical;
+  overflow: hidden; }
+.ovmore { color: var(--amber); font-size: 17px; cursor: pointer; margin-bottom: 12px;
+  display: inline-block; }
+.ovmore:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
+.genres { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+.gtag { border: 1px solid var(--line); border-radius: 3px; padding: 1px 9px;
+  font-size: 16px; color: var(--muted); }
 .meta { width: 100%; border-collapse: collapse; }
 .meta td { padding: 5px 0; font-size: 17px; border-bottom: 1px solid rgba(58,47,20,.5);
   vertical-align: top; }
@@ -1794,6 +1967,7 @@ function pickSys(id){ sel=id; shown=300; render();
 
 function pick(i){
   curGame=curList[i]||null;
+  _ovOpen=false;
   markSel();
   renderDetails();
   loadDetails();
@@ -1807,15 +1981,18 @@ function markSel(){
 function playIdx(i){ const g=curList[i]; if(g) launch(g.sysId,g.file,g.name); }
 
 let _det={};
+let _ovOpen=false;
 async function loadDetails(){
   if(!curGame) return;
-  const f=curGame.file;
+  const f=curGame.file, g=curGame;
   if(_det[f]) return;
   try{
-    _det[f]=await (await fetch('/api/details?rom='+encodeURIComponent(f))).json();
+    _det[f]=await (await fetch('/api/details?rom='+encodeURIComponent(f)
+      +'&system='+encodeURIComponent(g.sysId)+'&name='+encodeURIComponent(g.name))).json();
     if(curGame && curGame.file===f) renderDetails();
   }catch(e){}
 }
+function toggleOv(){ _ovOpen=!_ovOpen; renderDetails(); }
 
 function renderDetails(){
   const el=document.getElementById('details');
@@ -1841,15 +2018,49 @@ function renderDetails(){
     </div>
     <div class="stars">${stars}</div>
     ${shot}
+    ${overviewHtml(d)}
+    ${genresHtml(d)}
     <table class="meta">
       <tr><td>Platform</td><td>${esc(g.sysName||'')}</td></tr>
+      ${metaRows(d)}
       <tr><td>Play count</td><td>${g.plays||0}</td></tr>
       <tr><td>Last played</td><td>${g.last?esc(ago(g.last)):'never'}</td></tr>
-      <tr><td>Rating</td><td>${g.rating?g.rating+' / 5':'not rated'}</td></tr>
+      <tr><td>Your rating</td><td>${g.rating?g.rating+' / 5':'not rated'}</td></tr>
       <tr><td>File</td><td>${esc(d.file||'')}</td></tr>
       <tr><td>Size</td><td>${fmtSize(d.size)}</td></tr>
       <tr><td>Folder</td><td>${esc(d.folder||'')}</td></tr>
     </table></div>`;
+}
+
+function overviewHtml(d){
+  const m=d.meta;
+  if(!m||!m.ov){
+    if(d.meta===undefined) return '';
+    if(!(state.meta&&state.meta.have&&state.meta.have.length))
+      return `<div class="dim" style="margin:0 0 12px">No description &mdash; download the
+        games database in <b>SETTINGS</b> to add descriptions for every game.</div>`;
+    return `<div class="dim" style="margin:0 0 12px">No description found for this title.</div>`;
+  }
+  const long=m.ov.length>420;
+  return `<div class="overview${long&&!_ovOpen?' clip':''}">${esc(m.ov)}</div>`+
+    (long?`<span class="ovmore" onclick="toggleOv()">${_ovOpen?'▲ LESS':'▼ MORE'}</span>`:'');
+}
+function genresHtml(d){
+  const m=d.meta;
+  if(!m||!m.gen) return '';
+  return '<div class="genres">'+m.gen.split(/[;,]/).map(x=>x.trim()).filter(Boolean)
+    .map(x=>`<span class="gtag">${esc(x)}</span>`).join('')+'</div>';
+}
+function metaRows(d){
+  const m=d.meta; if(!m) return '';
+  const r=[];
+  if(m.yr) r.push(['Released',m.yr]);
+  if(m.dev) r.push(['Developer',m.dev]);
+  if(m.pub) r.push(['Publisher',m.pub]);
+  if(m.pl) r.push(['Players',m.pl]);
+  if(m.rt) r.push(['Community',Number(m.rt).toFixed(1)+' / 5']);
+  if(m.esrb) r.push(['Rated',m.esrb]);
+  return r.map(x=>`<tr><td>${x[0]}</td><td>${esc(x[1])}</td></tr>`).join('');
 }
 
 async function toggleFav(){
@@ -1943,6 +2154,15 @@ function renderPage(){
           <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
         </div></div>
       <div class="card">
+        <div class="head"><span class="nm">Game descriptions</span>${metaStatus()}</div>
+        <div class="dim">Downloads the LaunchBox Games Database dump (~100 MB, one time)
+          and builds a local index, giving every game a description plus developer,
+          publisher, genre, release year, player count and community rating in the
+          details panel. Re-run any time to refresh.</div>
+        <div class="fields">
+          <button class="filled" onclick="fetchMeta()">DOWNLOAD GAME DATABASE</button>
+        </div></div>
+      <div class="card">
         <div class="head"><span class="nm">Online art fetcher</span>${shotsStatus()}</div>
         <div class="dim">Downloads missing screenshots (and any missing covers) from the
           libretro thumbnail library, matched by title. Run it again any time &mdash;
@@ -1991,6 +2211,30 @@ function shotsStatus(){
   if(c.status==='fetching') return `<span class="pill dlp">${esc(c.sys||'')} ${c.done||0}/${c.total||0} &middot; ${c.found||0} FETCHED</span>`;
   if(c.status==='error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
   return `<span class="pill ok">DONE &middot; ${c.found} IMAGES FETCHED</span>`;
+}
+function metaStatus(){
+  const m=state.meta||{};
+  if(m.status==='downloading') return `<span class="pill dlp">DOWNLOADING ${m.pct||0}%</span>`;
+  if(m.status==='parsing') return `<span class="pill dlp">PARSING ${(m.games||0).toLocaleString()} GAMES...</span>`;
+  if(m.status==='error') return `<span class="pill bad">ERROR: ${esc(m.msg||'')}</span>`;
+  if(m.have&&m.have.length) return `<span class="pill ok">INSTALLED &middot; ${m.have.length} PLATFORMS</span>`;
+  return `<span class="pill bad">NOT INSTALLED</span>`;
+}
+let _metaPoll=null;
+async function fetchMeta(){
+  const r=await (await fetch('/api/fetchmeta',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  snack(r.ok?'DOWNLOADING GAME DATABASE (~100MB)...':'ERROR: '+r.msg);
+  if(r.ok&&!_metaPoll){
+    _metaPoll=setInterval(async()=>{
+      await refresh();
+      const st=(state.meta||{}).status;
+      if(st!=='downloading'&&st!=='parsing'){ clearInterval(_metaPoll); _metaPoll=null;
+        snack(st==='done'?'DESCRIPTIONS READY: '+(state.meta.games||0).toLocaleString()+' GAMES INDEXED'
+          :'DATABASE ERROR: '+(state.meta.msg||''));
+        _det={}; }
+    },2000);
+  }
 }
 let _shotPoll=null;
 async function fetchShots(){
