@@ -2213,8 +2213,6 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
 @keyframes shimmer {
   from { background-position-x: 260%; }
   to { background-position-x: -60%; } }
-.logo .cur { color: var(--amber); font-size: 15px; line-height: 1.6;
-  animation: blink 1.1s steps(1) infinite; text-shadow: 0 0 10px rgba(255,176,0,.7); }
 @media (max-width: 1500px) { .logo pre { font-size: 6.5px; } }
 @media (max-width: 1150px) { .logo { display: none; } }
 .searchwrap { flex: 1; max-width: 460px; position: relative; }
@@ -2241,7 +2239,6 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
   background: rgba(0,0,0,.35); border-bottom: 1px solid var(--line);
   white-space: nowrap; overflow: hidden; flex-shrink: 0;
   text-shadow: 0 0 8px rgba(255,176,0,.4); }
-#termline .cur { animation: blink 1.1s steps(1) infinite; }
 /* ---- three column shell ---- */
 #shell { flex: 1; display: flex; min-height: 0; position: relative; z-index: 1; }
 #sidebar { width: 226px; flex-shrink: 0; border-right: 1px solid var(--line);
@@ -2472,7 +2469,7 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 |_____/   ) \/    |      \\_ /   |_____/   )/  /    ) :)\___  \   \/      \/  \/    |  |:  |     \/    |
  //      /  // ___)_     |.  |    //      /(: (____/ //  __/  \\  //  __  \\  // ___)_  \  |___  // ___)
 |:  __   \ (:      "|    \:  |   |:  __   \ \        /  /" \   :)(:  (  )  :)(:      "|( \_|:  \(:  (
-|__|  \___) \_______)     \__|   |__|  \___) \"_____/  (_______/  \__|  |__/  \_______) \_______)\__/      </pre><span class="cur">▮</span></div>
+|__|  \___) \_______)     \__|   |__|  \___) \"_____/  (_______/  \__|  |__/  \_______) \_______)\__/      </pre></div>
     <div class="searchwrap">
       <input id="search" placeholder="search games..." oninput="onSearch()" autocomplete="off">
     </div>
@@ -2488,7 +2485,7 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
     <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
   </div>
   <div class="pulseline"></div>
-  <div id="termline">&gt; <span id="termtext"></span><span class="cur">▮</span></div>
+  <div id="termline">&gt; <span id="termtext"></span></div>
 </header>
 <div id="shell">
   <aside id="sidebar"></aside>
@@ -2580,7 +2577,7 @@ let _termInit=false;
 const BOOT='RETROSHELF BIOS v5.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK\nSCANNING GAME LIBRARY ...\n\nREADY.';
 (function boot(){
   const el=document.getElementById('boottext'), box=document.getElementById('boot');
-  let i=0; const t=setInterval(()=>{ i+=3; el.textContent=BOOT.slice(0,i)+'▮';
+  let i=0; const t=setInterval(()=>{ i+=3; el.textContent=BOOT.slice(0,i);
     if(i>=BOOT.length){ clearInterval(t); el.textContent=BOOT;
       setTimeout(()=>box.classList.add('off'),300); setTimeout(()=>box.remove(),900);} },16);
 })();
