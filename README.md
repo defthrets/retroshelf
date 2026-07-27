@@ -59,6 +59,21 @@ Custom exe paths and launch-argument templates (placeholders `{emu}` `{rom}`
   subfolder beside it, or centrally in `<art_root>\<system>\`.
 - Screenshot: same naming, in a `screens\`/`screenshots\` subfolder or
   `<art_root>\<system>\screens\`.
+- **Cover matcher** (Settings tab): point it at any folder of box-art images
+  and it matches them to your games by title (exact, then space-insensitive,
+  then fuzzy) and copies each hit into the art folder under the rom's name.
+
+## Building the exe
+
+```
+python -m pip install pyinstaller pillow
+python make_icon.py                       # generates retroshelf.ico
+python -m PyInstaller --onefile --noconsole --icon retroshelf.ico ^
+       --name RetroShelf retroshelf.py    # -> dist\RetroShelf.exe
+```
+
+The exe keeps its config (`retroshelf.json`) next to itself. Double-clicking
+it while it's already running just opens the browser tab again.
 
 ## Notes
 

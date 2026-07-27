@@ -1,2 +1,6 @@
-retroshelf.json
+build/
+dist/
+*.spec
+favicon32.png
 __pycache__/
+retroshelf.json

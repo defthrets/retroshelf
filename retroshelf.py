@@ -18,10 +18,12 @@ Run:  python retroshelf.py          (opens browser)
       python retroshelf.py --no-browser
 """
 
+import difflib
 import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -34,7 +36,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = 7830
-APP_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):          # running as a PyInstaller exe
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "retroshelf.json"
 
 DEFAULT_ARGS = '"{emu}" "{rom}"'
@@ -203,6 +208,7 @@ def default_config():
         "library_root": "C:\\RetroShelf\\games",
         "emulators_root": "C:\\RetroShelf\\emulators",
         "art_root": "C:\\RetroShelf\\art",
+        "covers_dir": "",
         "overrides": {}, "stats": {},
     }
 
@@ -487,6 +493,108 @@ def start_download(sysid, cfg):
     return True, "download started"
 
 
+# --- cover matching ---------------------------------------------------------
+
+COVERS = {}
+_cover_lock = threading.Lock()
+
+_norm_re = re.compile(r"[^a-z0-9]+")
+
+
+def _set_cov(**kw):
+    with _cover_lock:
+        COVERS.update(kw)
+
+
+def norm_title(s):
+    """Normalise a title for matching: drop tags/punctuation, split camelcase."""
+    s = TAG_RE.sub("", s)
+    s = re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", s)
+    s = _norm_re.sub(" ", s.lower()).strip()
+    if s.startswith("the "):
+        s = s[4:]
+    return s
+
+
+def _cover_worker(covers_dir, cfg):
+    try:
+        _set_cov(status="indexing", done=0, total=0, matched=0, copied=0, msg="")
+        root = Path(covers_dir)
+        if not root.is_dir():
+            _set_cov(status="error", msg="covers folder not found: " + str(root))
+            return
+        # index cover images, bucketed by system hint in the folder path
+        index = {}
+        for dirpath, _dirs, filenames in os.walk(root):
+            try:
+                rel = Path(dirpath).relative_to(root).parts
+            except ValueError:
+                rel = ()
+            hints = path_hints(rel)
+            bucket = hints[0] if hints else "*"
+            d = index.setdefault(bucket, {})
+            for f in filenames:
+                if Path(f).suffix.lower() not in ART_EXTS:
+                    continue
+                key = norm_title(Path(f).stem)
+                if key and key not in d:
+                    d[key] = Path(dirpath) / f
+        prepared = {}
+        for bk, d in index.items():
+            nospace, byletter = {}, {}
+            for k, v in d.items():
+                nospace.setdefault(k.replace(" ", ""), v)
+                byletter.setdefault(k[:1], []).append(k)
+            prepared[bk] = (d, nospace, byletter)
+
+        games = get_games(cfg)
+        todo = [(sysid, g) for sysid, lst in games.items() for g in lst]
+        _set_cov(status="matching", total=len(todo))
+        matched = copied = 0
+        for i, (sysid, g) in enumerate(todo):
+            if i % 50 == 0:
+                _set_cov(done=i, matched=matched, copied=copied)
+            key = norm_title(g["name"])
+            if not key:
+                continue
+            src = None
+            for bk in (sysid, "*"):
+                if bk not in prepared:
+                    continue
+                exact, nospace, byletter = prepared[bk]
+                src = exact.get(key) or nospace.get(key.replace(" ", ""))
+                if not src:
+                    close = difflib.get_close_matches(
+                        key, byletter.get(key[:1], []), n=1, cutoff=0.87)
+                    if close:
+                        src = exact[close[0]]
+                if src:
+                    break
+            if not src:
+                continue
+            matched += 1
+            dest_dir = Path(cfg["art_root"]) / sysid
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            target = dest_dir / (Path(g["file"]).stem + src.suffix.lower())
+            if not target.exists():
+                shutil.copy2(src, target)
+                copied += 1
+        _scan_cache["time"] = 0          # art changed — force fresh scan
+        _set_cov(status="done", done=len(todo), matched=matched, copied=copied)
+    except Exception as e:
+        _set_cov(status="error", msg=str(e))
+
+
+def start_cover_match(cfg, covers_dir):
+    if COVERS.get("status") in ("indexing", "matching"):
+        return True, "already matching"
+    if not covers_dir:
+        return False, "no covers folder set"
+    threading.Thread(target=_cover_worker, args=(covers_dir, cfg),
+                     daemon=True).start()
+    return True, "matching started"
+
+
 # --- state / launch ---------------------------------------------------------
 
 def build_state(cfg, rescan=False):
@@ -517,11 +625,15 @@ def build_state(cfg, rescan=False):
         })
     with _dl_lock:
         downloads = {k: dict(v) for k, v in DOWNLOADS.items()}
+    with _cover_lock:
+        covers = dict(COVERS)
     return {
         "library_root": cfg["library_root"],
         "emulators_root": cfg["emulators_root"],
         "art_root": cfg["art_root"],
+        "covers_dir": cfg.get("covers_dir", ""),
         "downloads": downloads,
+        "covers": covers,
         "systems": systems,
     }
 
@@ -633,11 +745,20 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/download":
                 ok, msg = start_download(body.get("id", ""), cfg)
                 self._json({"ok": ok, "msg": msg})
+            elif parsed.path == "/api/matchcovers":
+                covers_dir = body.get("dir", "").strip() or cfg.get("covers_dir", "")
+                if covers_dir:
+                    cfg["covers_dir"] = covers_dir
+                    save_config(cfg)
+                ok, msg = start_cover_match(cfg, covers_dir)
+                self._json({"ok": ok, "msg": msg})
             elif parsed.path == "/api/settings":
                 for key in ("library_root", "emulators_root", "art_root"):
                     val = body.get(key, "").strip()
                     if val:
                         cfg[key] = val
+                if "covers_dir" in body:
+                    cfg["covers_dir"] = body.get("covers_dir", "").strip()
                 save_config(cfg)
                 self._json({"ok": True, "msg": "saved"})
             elif parsed.path == "/api/system":
@@ -672,6 +793,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <title>RetroShelf</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAyUlEQVR4nGNkgAIuTrb/DHQE377/YgTRTAwDDBjp7XN0wMQwwIAFXeDcWk+aWmgUvH2Qh4D6r400tpJtkIfAzaeo/P7NlFlQ6Itfnolh0KUBaVS+MC9lFqCbN/hD4CZaGnj7mTIL0M0bdCHAiF4XfF3+i6YWckcOtXKA1oCJYbCXA8M+BBhxtYjO9VA3NxiVoKb+wZsGcKUF9PxLCBBbnjAxDNYQuElheUCsfiaG4d4v0P/WBKYvctWN0BAgBJgYBhgwwhgjtncMAOnbLhhwUHj1AAAAAElFTkSuQmCC">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1186,6 +1308,17 @@ function render() {
           <button class="filled" onclick="saveSettings()">SAVE &amp; RESCAN</button>
           <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
         </div></div>
+      <div class="card">
+        <div class="head"><span class="nm">Cover art matcher</span>${coverStatus()}</div>
+        <div class="dim">Point at a folder full of box-art images (any structure)
+          and RetroShelf matches them to your games by title and copies each one
+          into the art folder under the rom's exact name.</div>
+        <div class="flabel">COVERS SOURCE FOLDER</div>
+        <div class="fields">
+          <input class="cfg" id="coversdir" value="${esc(state.covers_dir || '')}"
+             placeholder="e.g. M:\\oldgames\\covers">
+          <button class="filled" onclick="matchCovers()">MATCH COVERS</button>
+        </div></div>
       <div class="card howto">
         <h3>HOW IT WORKS</h3>
         RetroShelf scans the games folder recursively and works out each game's
@@ -1238,6 +1371,38 @@ async function mkdirs() {
     headers:{'Content-Type':'application/json'}, body: '{}'})).json();
   snack(r.ok ? 'FOLDERS CREATED' : r.msg);
   refresh();
+}
+
+function coverStatus() {
+  const c = state.covers || {};
+  if (!c.status) return '';
+  if (c.status === 'indexing') return `<span class="pill dlp">INDEXING COVERS...</span>`;
+  if (c.status === 'matching')
+    return `<span class="pill dlp">MATCHING ${c.done||0}/${c.total||0} &middot; ${c.matched||0} FOUND</span>`;
+  if (c.status === 'error') return `<span class="pill bad">ERROR: ${esc(c.msg||'')}</span>`;
+  return `<span class="pill ok">DONE &middot; ${c.matched} MATCHED &middot; ${c.copied} COPIED</span>`;
+}
+
+let _covPoll = null;
+async function matchCovers() {
+  const dir = document.getElementById('coversdir').value.trim();
+  const r = await (await fetch('/api/matchcovers', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dir: dir})})).json();
+  snack(r.ok ? 'MATCHING COVERS...' : 'ERROR: ' + r.msg);
+  if (r.ok && !_covPoll) {
+    _covPoll = setInterval(async () => {
+      await refresh();
+      const st = (state.covers || {}).status;
+      if (st !== 'indexing' && st !== 'matching') {
+        clearInterval(_covPoll); _covPoll = null;
+        snack(st === 'done'
+          ? 'COVERS: ' + state.covers.matched + ' MATCHED, ' + state.covers.copied + ' COPIED'
+          : 'COVERS ERROR: ' + (state.covers.msg || ''));
+        refresh(true);
+      }
+    }, 1500);
+  }
 }
 
 /* ---- controller support (Gamepad API: Xbox, PlayStation, generic pads) ---- */
@@ -1375,8 +1540,13 @@ refresh();
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://127.0.0.1:{PORT}"
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        # already running (e.g. the exe was double-clicked twice) — just open it
+        webbrowser.open(url)
+        return
     print(f"RetroShelf running at {url}  (Ctrl+C to quit)")
     if "--no-browser" not in sys.argv:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
