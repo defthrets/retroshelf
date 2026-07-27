@@ -1382,6 +1382,87 @@ def sync_bios(cfg, sysid, emu):
                     pass
 
 
+# --- duplicate finder -------------------------------------------------------
+# Nothing is ever deleted outright: chosen files are moved to a quarantine
+# folder so a mistake can be undone by dragging them back.
+DISC_RE = re.compile(r"\(\s*(?:disc|disk|cd)\s*\d+", re.I)
+REGION_RANK = [("(usa", 0), ("(us)", 0), ("(world", 1), ("(europe", 2),
+               ("(eu)", 2), ("(japan", 3), ("(korea", 4)]
+
+
+def _region_rank(name):
+    n = name.lower()
+    for tag, rank in REGION_RANK:
+        if tag in n:
+            return rank
+    return 5
+
+
+def find_dupes(cfg):
+    games = get_games(cfg)
+    out = []
+    for sysid, lst in games.items():
+        if not lst:
+            continue
+        groups = {}
+        for g in lst:
+            groups.setdefault(norm_title(g["name"]), []).append(g)
+        for title, items in sorted(groups.items()):
+            if len(items) < 2:
+                continue
+            # multi-disc sets are not duplicates - leave them alone
+            if any(DISC_RE.search(Path(g["file"]).name) for g in items):
+                continue
+            files = []
+            for g in items:
+                p = Path(g["file"])
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    size = 0
+                files.append({"file": str(p), "name": p.name, "size": size,
+                              "plays": g.get("plays", 0),
+                              "rank": _region_rank(p.name)})
+            # suggested keeper: best region, then biggest, then most played
+            files.sort(key=lambda f: (f["rank"], -f["size"], -f["plays"]))
+            files[0]["keep"] = True
+            for f in files[1:]:
+                f["keep"] = False
+            out.append({"system": sysid,
+                        "sysname": SYSTEMS_BY_ID[sysid]["name"],
+                        "title": items[0]["name"], "files": files})
+    return out
+
+
+def quarantine(cfg, paths):
+    root = Path(cfg["library_root"])
+    dest_root = Path(cfg["emulators_root"]).parent / "quarantine"
+    moved, failed = 0, []
+    for s in paths:
+        p = Path(s)
+        try:
+            rel = p.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            failed.append(p.name + " (outside the games folder)")
+            continue
+        if not p.is_file():
+            failed.append(p.name + " (not found)")
+            continue
+        target = dest_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            target = target.with_name(target.stem + "_" + str(int(time.time()))
+                                      + target.suffix)
+        try:
+            shutil.move(str(p), str(target))
+            moved += 1
+        except OSError as e:
+            failed.append(p.name + " (" + str(e) + ")")
+    if moved:
+        _scan_cache["time"] = 0
+    return moved, failed
+
+
 def prep_emulator(sysid, emu):
     """First-run tweaks so a freshly downloaded emulator boots games directly
     instead of stopping at its setup wizard."""
@@ -1547,6 +1628,9 @@ class Handler(BaseHTTPRequestHandler):
             rescan = qs.get("rescan", ["0"])[0] == "1"
             with _lock:
                 self._json(build_state(load_config(), rescan=rescan))
+        elif parsed.path == "/api/dupes":
+            with _lock:
+                self._json({"groups": find_dupes(load_config())})
         elif parsed.path == "/api/details":
             qs = urllib.parse.parse_qs(parsed.query)
             rom = qs.get("rom", [""])[0]
@@ -1650,6 +1734,11 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["overrides"].pop(system_id, None)
                 save_config(cfg)
                 self._json({"ok": True, "msg": "saved"})
+            elif parsed.path == "/api/quarantine":
+                paths = body.get("files") or []
+                moved, failed = quarantine(cfg, paths)
+                self._json({"ok": True, "moved": moved, "failed": failed,
+                            "msg": f"moved {moved} file(s)"})
             elif parsed.path == "/api/clearcache":
                 try:
                     clear_cache(cfg)
@@ -1909,6 +1998,29 @@ header { flex-shrink: 0; background: rgba(10,9,6,.94); border-bottom: 1px solid 
 .genres { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
 .gtag { border: 1px solid var(--line); border-radius: 3px; padding: 1px 9px;
   font-size: 16px; color: var(--muted); }
+.dgroup { border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px;
+  margin-bottom: 10px; background: var(--panel); }
+.dgroup h4 { font-size: 22px; color: var(--amber2); font-weight: 400;
+  display: flex; align-items: center; gap: 8px; }
+.dgroup h4 small { color: var(--muted); font-size: 17px; }
+.dfile { display: flex; align-items: center; gap: 10px; padding: 4px 0 4px 4px;
+  font-size: 18px; border-top: 1px solid rgba(58,47,20,.45); }
+.dfile input { width: 16px; height: 16px; accent-color: var(--red); cursor: pointer; }
+.dfile .fn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text); }
+.dfile .sz { color: var(--muted); width: 90px; text-align: right; }
+.dfile .kp { color: var(--green); font-size: 16px; width: 74px; }
+.dfile.del .fn { color: var(--red); text-decoration: line-through; }
+.dbar { position: sticky; top: 0; z-index: 3; background: rgba(10,9,6,.96);
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px;
+  margin-bottom: 14px; display: flex; gap: 10px; align-items: center;
+  flex-wrap: wrap; }
+.dbar .grow { flex: 1; color: var(--muted); font-size: 18px; }
+button.danger { background: var(--red); border: none; color: #140505; font: inherit;
+  font-size: 19px; padding: 7px 20px; border-radius: 4px; cursor: pointer; }
+button.danger:hover { box-shadow: 0 0 16px rgba(255,85,68,.6); }
+button.danger:disabled { background: var(--line); color: var(--muted); cursor: default;
+  box-shadow: none; }
 .meta { width: 100%; border-collapse: collapse; }
 .meta td { padding: 5px 0; font-size: 17px; border-bottom: 1px solid rgba(58,47,20,.5);
   vertical-align: top; }
@@ -1994,6 +2106,7 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
   <div class="tabs">
     <button id="tab-games" class="on" onclick="setTab('games')">GAMES</button>
     <button id="tab-systems" onclick="setTab('systems')">SYSTEMS</button>
+    <button id="tab-dupes" onclick="setTab('dupes')">DUPES</button>
     <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
   </div>
   <div class="pulseline"></div>
@@ -2131,6 +2244,7 @@ function setTab(t){
   if(t==='games') typeTerm('LOAD "GAMES",8,1: '+allGames().length+' FOUND. READY.');
   else if(t==='systems') typeTerm('SYS 49152: '+state.systems.filter(s=>s.emu_found).length+
     ' OF '+state.systems.length+' EMULATORS READY.');
+  else if(t==='dupes') typeTerm('SEARCHING FOR DUPLICATE TITLES...');
   else typeTerm('OPEN 15,8,15,"CONFIG": READY.');
 }
 
@@ -2421,9 +2535,83 @@ async function launch(sysId,rom,name){
 }
 
 /* ---------- systems / settings pages ---------- */
+let dupes=null, dupeSel={};
+async function loadDupes(force){
+  const body=document.getElementById('pagebody');
+  if(dupes && !force){ renderDupes(); return; }
+  body.innerHTML='<div class="empty"><div class="big">SCANNING...</div>'
+    +'looking for titles that appear more than once</div>';
+  dupes=(await (await fetch('/api/dupes')).json()).groups;
+  renderDupes();
+}
+function dupeCount(){ return Object.values(dupeSel).filter(Boolean).length; }
+function dupeBytes(){
+  let b=0;
+  for(const g of dupes||[]) for(const f of g.files) if(dupeSel[f.file]) b+=f.size;
+  return b;
+}
+function toggleDupe(f,el){
+  dupeSel[f]=!dupeSel[f];
+  el.closest('.dfile').classList.toggle('del',dupeSel[f]);
+  document.getElementById('dsum').textContent=
+    dupeCount()+' selected · '+fmtSize(dupeBytes());
+  document.getElementById('dgo').disabled=dupeCount()===0;
+}
+function selectSuggested(){
+  dupeSel={};
+  for(const g of dupes||[]) for(const f of g.files) if(!f.keep) dupeSel[f.file]=true;
+  renderDupes();
+}
+function clearDupeSel(){ dupeSel={}; renderDupes(); }
+async function runQuarantine(){
+  const files=Object.keys(dupeSel).filter(k=>dupeSel[k]);
+  if(!files.length) return;
+  if(!confirm('Move '+files.length+' file(s) to the quarantine folder?\n\n'
+    +'They are NOT deleted - they move to RetroShelf\\quarantine\\ so you can '
+    +'put them back or delete them yourself later.')) return;
+  const r=await (await fetch('/api/quarantine',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({files:files})})).json();
+  snack('MOVED '+r.moved+' FILE(S) TO QUARANTINE'+(r.failed.length?' - '+r.failed.length+' FAILED':''));
+  dupeSel={}; await refresh(true); loadDupes(true);
+}
+function renderDupes(){
+  const body=document.getElementById('pagebody');
+  document.getElementById('count').textContent=
+    (dupes?dupes.length:0)+' duplicate titles';
+  if(!dupes || !dupes.length){
+    body.innerHTML='<div class="empty"><div class="big">NO DUPLICATES</div>'
+      +'Every title in your library appears once.<br>'
+      +'Multi-disc sets are never treated as duplicates.</div>';
+    return;
+  }
+  body.innerHTML=`<div class="dbar">
+      <button class="outlined" onclick="selectSuggested()">SELECT SUGGESTED</button>
+      <button class="outlined" onclick="clearDupeSel()">CLEAR</button>
+      <span class="grow" id="dsum">${dupeCount()} selected · ${fmtSize(dupeBytes())}</span>
+      <button class="danger" id="dgo" onclick="runQuarantine()"
+        ${dupeCount()?'':'disabled'}>MOVE TO QUARANTINE</button>
+    </div>
+    <div class="dim" style="margin:0 0 14px">Nothing is deleted &mdash; selected files
+      move to <b>${esc(state.emulators_root.replace(/emulators$/,'quarantine'))}\\</b>,
+      keeping their folder structure, so you can put them back. Suggested keepers
+      (marked <span style="color:var(--green)">KEEP</span>) prefer USA/World releases,
+      then the largest file. Multi-disc games are excluded.</div>`
+    + dupes.map(g=>`<div class="dgroup">
+        <h4>${sysLogo(g.system,16)}${esc(g.title)} <small>${esc(g.sysname)} · ${g.files.length} files</small></h4>
+        ${g.files.map(f=>`<div class="dfile${dupeSel[f.file]?' del':''}">
+          <input type="checkbox" ${dupeSel[f.file]?'checked':''}
+            onchange="toggleDupe(${JSON.stringify(f.file).replace(/"/g,'&quot;')},this)">
+          <span class="kp">${f.keep?'KEEP':''}</span>
+          <span class="fn">${esc(f.name)}</span>
+          <span class="sz">${fmtSize(f.size)}</span></div>`).join('')}
+      </div>`).join('');
+}
+
 function renderPage(){
   const body=document.getElementById('pagebody');
   const count=document.getElementById('count');
+  if(tab==='dupes'){ loadDupes(); return; }
   if(tab==='systems'){
     count.textContent=state.systems.filter(s=>s.emu_found).length+' of '+
       state.systems.length+' emulators ready';
@@ -2668,7 +2856,7 @@ function move(d){
 
 /* ---------- controller ---------- */
 const gpState={last:{},heldDir:null,lastMove:0,fast:false,known:{}};
-const TABS=['games','systems','settings'];
+const TABS=['games','systems','dupes','settings'];
 function padName(id){
   const s=(id||'').toLowerCase();
   if(s.includes('xbox')||s.includes('xinput')) return 'Xbox controller';
