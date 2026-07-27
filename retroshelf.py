@@ -247,8 +247,19 @@ def default_config():
     }
 
 
+_cfg_cache = {"mtime": None, "data": None}
+
+
 def load_config():
-    if CONFIG_PATH.exists():
+    """Parsed config, reused until the file changes on disk. It is read on
+    every art request, and re-parsing hundreds of KB each time is slow."""
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    if _cfg_cache["data"] is not None and _cfg_cache["mtime"] == mtime:
+        return _cfg_cache["data"]
+    if mtime is not None:
         try:
             cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -257,11 +268,16 @@ def load_config():
         cfg = default_config()
     for key, val in default_config().items():
         cfg.setdefault(key, val)
+    _cfg_cache.update(mtime=mtime, data=cfg)
     return cfg
 
 
 def save_config(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    try:
+        _cfg_cache.update(mtime=CONFIG_PATH.stat().st_mtime_ns, data=cfg)
+    except OSError:
+        _cfg_cache.update(mtime=None, data=cfg)
 
 
 _emu_cache = {}
@@ -499,7 +515,8 @@ def request_rescan(cfg):
         try:
             get_games(cfg, force=True)
             _scan_cache["version"] += 1
-            _art_cache.clear()
+            # note: the art cache is deliberately kept - art does not move
+            # because the game list changed, and rebuilding it is expensive
         finally:
             _scan_busy.clear()
     threading.Thread(target=work, daemon=True).start()
@@ -567,12 +584,14 @@ def find_art(sysdef, rom_path, cfg, kind="cover"):
 
 def _find_art_uncached(sysdef, rom_path, cfg, kind="cover"):
     stem = rom_path.stem
+    # the central art folder is checked first: it holds almost everything and
+    # lives on a local disk, while the game folders can be on a slow drive
     if kind == "screen":
-        dirs = [rom_path.parent / "screens", rom_path.parent / "screenshots",
-                Path(cfg["art_root"]) / sysdef["id"] / "screens"]
+        dirs = [Path(cfg["art_root"]) / sysdef["id"] / "screens",
+                rom_path.parent / "screens", rom_path.parent / "screenshots"]
     else:
-        dirs = [rom_path.parent, rom_path.parent / "art",
-                rom_path.parent / "covers", Path(cfg["art_root"]) / sysdef["id"]]
+        dirs = [Path(cfg["art_root"]) / sysdef["id"], rom_path.parent,
+                rom_path.parent / "art", rom_path.parent / "covers"]
     for d in dirs:
         for ext in ART_EXTS:
             c = d / (stem + ext)
@@ -1971,9 +1990,25 @@ def create_layout(cfg):
         (Path(cfg["art_root"]) / sysdef["id"] / "screens").mkdir(parents=True, exist_ok=True)
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # a page of covers opens a lot of sockets at once; the default backlog of
+    # 5 makes Windows refuse the overflow, which shows up as missing images
+    request_queue_size = 128
+    allow_reuse_address = True
+
+
 class Handler(BaseHTTPRequestHandler):
+    # keep-alive: one connection serves many images instead of one each
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, fmt, *args):
         pass
+
+    def _empty(self, code):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode("utf-8")
@@ -2030,8 +2065,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_config()
             art = find_art(sysdef, Path(rom), cfg, kind) if sysdef and rom else None
             if not art:
-                self.send_response(404)
-                self.end_headers()
+                self._empty(404)
                 return
             data = art.read_bytes()
             ctype = mimetypes.guess_type(str(art))[0] or "image/png"
@@ -2042,8 +2076,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._empty(404)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -2130,8 +2163,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError as e:
                     self._json({"ok": False, "msg": str(e)})
             else:
-                self.send_response(404)
-                self.end_headers()
+                self._empty(404)
 
 
 HTML_PAGE = r"""<!DOCTYPE html>
@@ -3433,7 +3465,7 @@ def main():
     url = f"http://127.0.0.1:{PORT}"
     server = None
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        server = Server(("127.0.0.1", PORT), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         threading.Thread(target=_watch_worker, daemon=True).start()
         print(f"RetroShelf running at {url}")
