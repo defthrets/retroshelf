@@ -110,9 +110,7 @@ SYSTEMS = [
      "emu_url": "https://github.com/stenzek/duckstation/releases",
      "dl": {"repo": "stenzek/duckstation",
             "asset": r"^duckstation-windows-x64-release\.zip$"},
-     "note": "DuckStation needs a PlayStation BIOS image (e.g. scph5501.bin) in "
-             "its bios folder - set it once via Settings > BIOS in DuckStation. "
-             "Zip/7z/rar game archives are unpacked automatically on first launch."},
+     "note": "Zip/7z/rar game archives are unpacked automatically on first launch."},
     {"id": "ps2", "name": "PlayStation 2",
      "exes": ["pcsx2-qt.exe", "pcsx2-qtx64-avx2.exe", "pcsx2.exe"],
      "args": DEFAULT_ARGS,
@@ -1193,7 +1191,19 @@ def build_state(cfg, rescan=False):
             gl.append({**g, "plays": st.get("plays", 0), "last": st.get("last", 0),
                        "fav": st.get("fav", False),
                        "rating": st.get("rating", 0)})
+        bios_rule = BIOS_RULES.get(sysdef["id"])
+        if sysdef["id"] == "amiga":
+            nbios = len(list((Path(cfg["emulators_root"]) / "amiga" /
+                              "kickstarts").glob("*.rom"))) if emu else 0
+            bdir = str(Path(cfg["emulators_root"]) / "amiga" / "kickstarts")
+        else:
+            nbios = len(bios_files(cfg, sysdef["id"])) if bios_rule else 0
+            bdir = str(Path(cfg["emulators_root"]).parent / "bios" / sysdef["id"])
         systems.append({
+            "bios_needed": bool(bios_rule),
+            "bios_count": nbios,
+            "bios_dir": bdir,
+            "bios_hint": bios_rule["hint"] if bios_rule else "",
             "id": sysdef["id"],
             "name": sysdef["name"],
             "exts": exts_for(sysdef["id"]),
@@ -1231,6 +1241,85 @@ def build_state(cfg, rescan=False):
         "shots": shots,
         "systems": systems,
     }
+
+
+# --- BIOS handling ----------------------------------------------------------
+# Drop BIOS files into <root>\bios\<system>\ and RetroShelf copies them where
+# each emulator expects them. Some emulators need a marker file to keep their
+# data next to the exe instead of in Documents.
+BIOS_RULES = {
+    "ps1": {"dirs": ["bios"], "portable": "portable.txt",
+            "hint": "PlayStation BIOS, e.g. scph5501.bin / scph1001.bin"},
+    "ps2": {"dirs": ["bios"], "portable": "portable.ini",
+            "hint": "PS2 BIOS, e.g. SCPH-70012.bin (+ its .MEC/.NVM files)"},
+    "dreamcast": {"dirs": ["data"], "portable": None,
+                  "hint": "Dreamcast dc_boot.bin and dc_flash.bin"},
+    "amiga": {"dirs": [], "portable": None,
+              "hint": "Amiga Kickstart roms (kickstarts folder)"},
+}
+
+
+def bios_dir(cfg, sysid):
+    d = Path(cfg["emulators_root"]).parent / "bios" / sysid
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def bios_files(cfg, sysid):
+    d = Path(cfg["emulators_root"]).parent / "bios" / sysid
+    if not d.is_dir():
+        return []
+    return [p for p in sorted(d.iterdir())
+            if p.is_file() and p.suffix.lower() not in (".txt", ".md")]
+
+
+def sync_bios(cfg, sysid, emu):
+    """Copy dropped BIOS files into the emulator's own folder."""
+    rule = BIOS_RULES.get(sysid)
+    if not rule or not emu:
+        return
+    files = bios_files(cfg, sysid)
+    if not files:
+        return
+    base = emu.parent
+    if rule["portable"]:
+        marker = base / rule["portable"]
+        if not marker.exists():
+            marker.write_text("", encoding="utf-8")
+    for sub in rule["dirs"]:
+        target = base / sub
+        target.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            dst = target / f.name
+            if not dst.exists() or dst.stat().st_size != f.stat().st_size:
+                try:
+                    shutil.copy2(f, dst)
+                except OSError:
+                    pass
+
+
+def prep_emulator(sysid, emu):
+    """First-run tweaks so a freshly downloaded emulator boots games directly
+    instead of stopping at its setup wizard."""
+    if not emu:
+        return
+    base = emu.parent
+    if sysid == "ps1":
+        ini = base / "settings.ini"
+        try:
+            if not ini.exists():
+                ini.write_text("[Main]\nSetupWizardIncomplete = false\n\n"
+                               "[BIOS]\nSearchDirectory = bios\n",
+                               encoding="utf-8")
+            else:
+                t = ini.read_text(encoding="utf-8", errors="replace")
+                if "SetupWizardIncomplete" not in t and "[Main]" in t:
+                    ini.write_text(
+                        t.replace("[Main]\n",
+                                  "[Main]\nSetupWizardIncomplete = false\n", 1),
+                        encoding="utf-8")
+        except OSError:
+            pass
 
 
 def cache_dir(cfg, sysid):
@@ -1303,6 +1392,8 @@ def launch_game(cfg, system_id, rom):
     emu = find_emulator(sysdef, cfg)
     if not emu:
         return False, "no emulator found for " + sysdef["name"]
+    sync_bios(cfg, system_id, emu)
+    prep_emulator(system_id, emu)
     if system_id == "amiga":
         try:
             ok, msg = _amiga_launch(cfg, rom_path, emu)
@@ -2268,12 +2359,15 @@ function renderPage(){
       else detail=`Needs <b>${esc(s.emu_name)}</b> &mdash; download from ${link}
         and unzip into <b>${esc(s.emu_dir)}\\</b>.`;
       const note=s.note?`<div class="dim">▲ ${esc(s.note)}</div>`:'';
+      const bios=s.bios_needed?`<div class="dim">${s.bios_count
+        ?`<span style="color:var(--green)">● BIOS OK</span> &mdash; ${s.bios_count} file${s.bios_count===1?'':'s'} installed from <b>${esc(s.bios_dir)}\\</b>`
+        :`<span style="color:var(--red)">● BIOS NEEDED</span> &mdash; put the ${esc(s.bios_hint)} into <b>${esc(s.bios_dir)}\\</b> and RetroShelf installs it for you`}</div>`:'';
       const dlbtn=(!s.emu_found&&!busy&&s.dl==='auto')
         ?`<button class="filled" onclick="download('${s.id}')">DOWNLOAD ${esc(s.emu_name.toUpperCase())}</button>`:'';
       return `<div class="card">
         <div class="head">${sysLogo(s.id,22)}<span class="nm">${esc(s.name)}</span>${status}${err}</div>
         <div class="dim">${detail}<br>Game files: <b>${esc(s.exts.join(' '))}</b>
-          &middot; ${s.games.length} found</div>${note}
+          &middot; ${s.games.length} found</div>${bios}${note}
         <div class="fields">${dlbtn}
           <input class="cfg" id="ep-${s.id}" placeholder="custom emulator exe path (optional)"
             value="${esc(s.emu_override)}">
