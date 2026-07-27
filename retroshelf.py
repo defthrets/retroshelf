@@ -109,7 +109,10 @@ SYSTEMS = [
      "emu_name": "DuckStation", "emu_site": "duckstation.org",
      "emu_url": "https://github.com/stenzek/duckstation/releases",
      "dl": {"repo": "stenzek/duckstation",
-            "asset": r"^duckstation-windows-x64-release\.zip$"}},
+            "asset": r"^duckstation-windows-x64-release\.zip$"},
+     "note": "DuckStation needs a PlayStation BIOS image (e.g. scph5501.bin) in "
+             "its bios folder - set it once via Settings > BIOS in DuckStation. "
+             "Zip/7z/rar game archives are unpacked automatically on first launch."},
     {"id": "ps2", "name": "PlayStation 2",
      "exes": ["pcsx2-qt.exe", "pcsx2-qtx64-avx2.exe", "pcsx2.exe"],
      "args": DEFAULT_ARGS,
@@ -166,15 +169,23 @@ UNIQUE_EXTS = {
     ".adf": "amiga", ".lha": "amiga", ".ipf": "amiga",
 }
 AMBIG_EXTS = {
-    ".zip": ["arcade", "nes", "snes", "n64", "gb", "gba", "genesis", "atari2600"],
-    ".7z": ["arcade"],
-    ".iso": ["ps2", "psp", "gamecube", "wii"],
+    ".zip": ["arcade", "nes", "snes", "n64", "gb", "gba", "genesis", "atari2600",
+             "ps1", "amiga", "c64"],
+    ".7z": ["arcade", "ps1", "amiga"],
+    ".iso": ["ps2", "psp", "ps1", "gamecube", "wii"],
     ".bin": ["genesis", "atari2600", "ps1", "c64"],
     ".chd": ["ps1", "ps2", "dreamcast", "psp"],
     ".cue": ["ps1", "dreamcast"],
     ".img": ["ps1"],
-    ".rar": ["amiga"],
+    ".ecm": ["ps1"],
+    ".mds": ["ps1"],
+    ".rar": ["amiga", "ps1"],
 }
+ARCHIVE_EXTS = {".zip", ".7z", ".rar"}
+# systems whose games are disc images; archives are unpacked before launching
+DISC_SYSTEMS = {"ps1", "ps2", "psp", "dreamcast", "gamecube", "wii"}
+DISC_PLAYABLE = [".cue", ".chd", ".m3u", ".pbp", ".iso", ".img", ".bin", ".gdi",
+                 ".cdi", ".cso", ".mds"]
 # Folder-name hints (checked deepest folder first; more specific systems first)
 HINTS = {
     "gba": ["gba", "game boy advance", "gameboy advance"],
@@ -330,9 +341,13 @@ def classify(parts, ext, path):
     cands = AMBIG_EXTS.get(ext)
     if not cands:
         return None
-    for h in path_hints(parts):
+    hints = path_hints(parts)
+    for h in hints:
         if h in cands:
             return h
+    # an archive can hold anything, so trust the folder the user filed it under
+    if ext in ARCHIVE_EXTS and hints:
+        return hints[0]
     if ext == ".zip":
         peeked = zip_peek(path)
         if peeked:
@@ -404,8 +419,8 @@ def scan_all(cfg):
     return games
 
 
-_scan_cache = {"key": None, "time": 0.0, "data": None}
-SCAN_TTL = 120
+_scan_cache = {"key": None, "time": 0.0, "data": None, "version": 0}
+SCAN_TTL = 300
 
 
 def get_games(cfg, force=False):
@@ -417,6 +432,43 @@ def get_games(cfg, force=False):
     data = scan_all(cfg)
     _scan_cache.update(key=key, time=now, data=data)
     return data
+
+
+def library_signature(root):
+    """Cheap fingerprint of the library: every folder's mtime and entry count.
+    Adding or removing a file bumps its folder's mtime, so this catches new
+    games without walking every file."""
+    sig = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not skip_dir(d)]
+            try:
+                sig.append((dirpath, int(os.stat(dirpath).st_mtime),
+                            len(filenames)))
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return hash(tuple(sig))
+
+
+def _watch_worker():
+    """Notice new games dropped into the library and refresh the scan."""
+    last = None
+    while True:
+        time.sleep(20)
+        try:
+            cfg = load_config()
+            sig = library_signature(cfg["library_root"])
+            if sig is None:
+                continue
+            if last is not None and sig != last:
+                _scan_cache["time"] = 0            # force a rescan next request
+                get_games(cfg, force=True)
+                _scan_cache["version"] += 1
+            last = sig
+        except Exception:
+            continue
 
 
 def find_art(sysdef, rom_path, cfg, kind="cover"):
@@ -1168,6 +1220,8 @@ def build_state(cfg, rescan=False):
     meta["have"] = meta_have()
     return {
         "meta": meta,
+        "version": _scan_cache["version"],
+        "cache_size": cache_size(cfg),
         "library_root": cfg["library_root"],
         "emulators_root": cfg["emulators_root"],
         "art_root": cfg["art_root"],
@@ -1177,6 +1231,61 @@ def build_state(cfg, rescan=False):
         "shots": shots,
         "systems": systems,
     }
+
+
+def cache_dir(cfg, sysid):
+    d = Path(cfg["emulators_root"]).parent / "cache" / sysid
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cache_size(cfg):
+    root = Path(cfg["emulators_root"]).parent / "cache"
+    total = 0
+    if root.is_dir():
+        for p in root.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def clear_cache(cfg):
+    root = Path(cfg["emulators_root"]).parent / "cache"
+    if root.is_dir():
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _pick_disc(d):
+    """Best playable disc file inside an extracted folder."""
+    files = [p for p in d.rglob("*") if p.is_file()]
+    for ext in DISC_PLAYABLE:
+        hits = sorted((p for p in files if p.suffix.lower() == ext),
+                      key=lambda p: (len(p.parts), p.name.lower()))
+        if hits:
+            if ext == ".bin" and len(hits) > 1:
+                continue          # multi-track bin set needs its cue
+            return hits[0]
+    return None
+
+
+def unpack_disc(cfg, sysid, rom_path):
+    """Archived disc images are extracted once into the cache folder."""
+    dest = cache_dir(cfg, sysid) / _vol_name(rom_path.stem)
+    hit = _pick_disc(dest) if dest.is_dir() else None
+    if hit:
+        return hit
+    extract_archive(rom_path, dest)
+    for inner in list(dest.rglob("*")):
+        if inner.is_file() and inner.suffix.lower() in ARCHIVE_EXTS:
+            extract_archive(inner, dest)
+            inner.unlink(missing_ok=True)
+    hit = _pick_disc(dest)
+    if not hit:
+        raise RuntimeError("no disc image found inside " + rom_path.name)
+    return hit
 
 
 def launch_game(cfg, system_id, rom):
@@ -1202,12 +1311,19 @@ def launch_game(cfg, system_id, rom):
         if not ok:
             return False, msg
     else:
+        play_path = rom_path
+        if (system_id in DISC_SYSTEMS
+                and rom_path.suffix.lower() in ARCHIVE_EXTS):
+            try:
+                play_path = unpack_disc(cfg, system_id, rom_path)
+            except Exception as e:
+                return False, "could not unpack: " + str(e)
         args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
         cmd = (args_tpl
                .replace("{emu}", str(emu))
-               .replace("{rom}", str(rom_path))
-               .replace("{romname}", rom_path.stem)
-               .replace("{romdir}", str(rom_path.parent)))
+               .replace("{rom}", str(play_path))
+               .replace("{romname}", play_path.stem)
+               .replace("{romdir}", str(play_path.parent)))
         try:
             subprocess.Popen(cmd, cwd=str(emu.parent))
         except OSError as e:
@@ -1358,6 +1474,12 @@ class Handler(BaseHTTPRequestHandler):
                     cfg["overrides"].pop(system_id, None)
                 save_config(cfg)
                 self._json({"ok": True, "msg": "saved"})
+            elif parsed.path == "/api/clearcache":
+                try:
+                    clear_cache(cfg)
+                    self._json({"ok": True, "msg": "cache cleared"})
+                except OSError as e:
+                    self._json({"ok": False, "msg": str(e)})
             elif parsed.path == "/api/mkdirs":
                 try:
                     create_layout(cfg)
@@ -1803,6 +1925,25 @@ async function refresh(rescan){
     typeTerm('LOAD "*",8,1  SEARCHING... '+allGames().length+' GAMES FOUND. READY.'); }
 }
 
+/* watch for games added to the library while the app is open */
+let _libVer=null, _libCount=null;
+setInterval(async () => {
+  try{
+    const s = await (await fetch('/api/state')).json();
+    const n = s.systems.reduce((a,x)=>a+x.games.length,0);
+    if(_libVer===null){ _libVer=s.version; _libCount=n; return; }
+    if(s.version!==_libVer || n!==_libCount){
+      const added = n - _libCount;
+      _libVer=s.version; _libCount=n;
+      state=s; render();
+      if(added>0){
+        snack(added+(added===1?' NEW GAME FOUND':' NEW GAMES FOUND'));
+        typeTerm('LOAD "*",8,1  '+added+' NEW GAME'+(added===1?'':'S')+' ADDED. READY.');
+      } else if(added<0){ snack(Math.abs(added)+' GAMES REMOVED'); }
+    }
+  }catch(e){}
+}, 15000);
+
 function setTab(t){
   tab=t;
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));
@@ -1979,6 +2120,7 @@ function markSel(){
   });
 }
 function playIdx(i){ const g=curList[i]; if(g) launch(g.sysId,g.file,g.name); }
+function playCur(){ if(curGame) launch(curGame.sysId,curGame.file,curGame.name); }
 
 let _det={};
 let _ovOpen=false;
@@ -2011,7 +2153,7 @@ function renderDetails(){
   el.innerHTML=`${cover}<div class="dbody">
     <div class="dtitle">${esc(g.name)}</div>
     <div class="dsys">${sysLogo(g.sysId,15)}${esc(g.sysName||'')}</div>
-    <button class="playbig" onclick="launch(${JSON.stringify(g.sysId)},${JSON.stringify(g.file)},${JSON.stringify(g.name)})">▶ PLAY</button>
+    <button class="playbig" onclick="playCur()">▶ PLAY</button>
     <div class="drow2">
       <button onclick="toggleFav()">${g.fav?'★ FAVOURITE':'☆ FAVOURITE'}</button>
       <button onclick="openFolder()">📁 FOLDER</button>
@@ -2152,6 +2294,15 @@ function renderPage(){
         <div class="fields">
           <button class="filled" onclick="saveSettings()">SAVE &amp; RESCAN</button>
           <button class="outlined" onclick="mkdirs()">CREATE FOLDER LAYOUT</button>
+        </div></div>
+      <div class="card">
+        <div class="head"><span class="nm">Unpacked disc cache</span>
+          <span class="pill ${state.cache_size?'ok':'bad'}">${fmtSize(state.cache_size)}</span></div>
+        <div class="dim">Zip/7z/rar disc games (PlayStation, PS2, Dreamcast&hellip;) are
+          unpacked here once so the emulator can load them; later launches are instant.
+          Clearing it just means the next launch unpacks again.</div>
+        <div class="fields">
+          <button class="outlined" onclick="clearCache()">CLEAR CACHE</button>
         </div></div>
       <div class="card">
         <div class="head"><span class="nm">Game descriptions</span>${metaStatus()}</div>
@@ -2296,6 +2447,11 @@ async function saveSettings(){
       art_root:document.getElementById('artroot').value})});
   snack('SAVED - RESCANNING...'); refresh(true);
 }
+async function clearCache(){
+  const r=await (await fetch('/api/clearcache',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  snack(r.ok?'CACHE CLEARED':r.msg); refresh();
+}
 async function mkdirs(){
   const r=await (await fetch('/api/mkdirs',{method:'POST',
     headers:{'Content-Type':'application/json'},body:'{}'})).json();
@@ -2406,6 +2562,7 @@ def main():
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=_watch_worker, daemon=True).start()
         print(f"RetroShelf running at {url}")
     except OSError:
         pass    # already running — just open another window/tab on it
