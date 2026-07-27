@@ -33,12 +33,12 @@ DESIGN = [
 
 COLORS = {
     ".": (0, 0, 0, 0),
-    "b": (10, 9, 6, 255),        # near-black tile
-    "B": (30, 26, 16, 255),
-    "A": (255, 215, 94, 255),    # light amber edge
-    "a": (255, 176, 0, 255),     # amber cart body
-    "d": (122, 85, 0, 255),      # dark label window
-    "g": (57, 255, 136, 255),    # green power pixel
+    "b": (5, 4, 10, 255),        # near-black tile
+    "B": (26, 20, 40, 255),
+    "A": (255, 140, 190, 255),   # light magenta edge
+    "a": (255, 31, 111, 255),    # magenta cart body
+    "d": (60, 8, 40, 255),       # dark label window
+    "g": (0, 224, 255, 255),     # cyan power pixel
 }
 
 
