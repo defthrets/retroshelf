@@ -24,6 +24,7 @@ import mimetypes
 import os
 import re
 import shutil
+import zlib
 import subprocess
 import sys
 import threading
@@ -140,11 +141,12 @@ SYSTEMS = [
      "emu_name": "WinUAE", "emu_site": "winuae.net",
      "emu_url": "https://www.winuae.net/download/",
      "dl": {"url": "https://download.abime.net/winuae/releases/WinUAE6010_x64.zip"},
-     "note": "Needs Amiga Kickstart ROMs: drop the .rom files into "
-             "emulators\\amiga\\kickstarts\\ then in WinUAE do Paths > "
-             "System ROMs > point at that folder > Rescan ROMs (one time). "
-             "ADF disks launch directly; WHDLoad archives (.lha/.rar) need "
-             "a one-time WinUAE Quickstart setup."},
+     "note": "Auto-boots WHDLoad games: the archive is extracted and booted "
+             "through WHDLoad automatically (needs 7-Zip installed). "
+             "You must supply Kickstart ROMs: drop the .rom files into "
+             "emulators\\amiga\\kickstarts\\ (plain dumps; Cloanto-encrypted "
+             "ROMs are not supported). Include Kickstart 3.1 A1200 + 1.3 "
+             "for best coverage. Launch args are managed automatically."},
 ]
 
 SYSTEMS_BY_ID = {s["id"]: s for s in SYSTEMS}
@@ -595,6 +597,191 @@ def start_cover_match(cfg, covers_dir):
     return True, "matching started"
 
 
+# --- Amiga WHDLoad launching -------------------------------------------------
+# The user's Amiga games are WHDLoad installs packed as .rar/.lha. WinUAE can't
+# boot those directly, so on launch we extract the archive, build a minimal
+# bootable volume with the (freely distributed) WHDLoad binary, and generate a
+# per-game WinUAE config. Kickstart ROMs must be supplied by the user in
+# emulators\amiga\kickstarts\ — identified by CRC32 and copied where WHDLoad
+# expects them.
+
+WHDLOAD_URL = "https://whdload.de/whdload/WHDLoad_usr.lha"
+
+KICK_CRCS = {  # well-known Kickstart image checksums -> WHDLoad image name
+    0x11F9E62F: "kick33180.A500",    # Kickstart 1.2
+    0xC4F0F55F: "kick34005.A500",    # Kickstart 1.3
+    0xC3BDB240: "kick37175.A500",    # Kickstart 2.04
+    0x6C9B07D2: "kick39106.A1200",   # Kickstart 3.0 A1200
+    0x1483A091: "kick40068.A1200",   # Kickstart 3.1 A1200
+    0xD6BAE334: "kick40068.A4000",   # Kickstart 3.1 A4000
+    0xE40A5DFB: "kick40063.A600",    # Kickstart 3.1 A600
+}
+AGA_KICKS = ("kick40068.A1200", "kick39106.A1200")
+
+_NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def find_7z():
+    for c in (r"C:\Program Files\7-Zip\7z.exe",
+              r"C:\Program Files (x86)\7-Zip\7z.exe"):
+        if Path(c).is_file():
+            return c
+    return shutil.which("7z")
+
+
+def extract_archive(archive, dest):
+    exe = find_7z()
+    if not exe:
+        raise RuntimeError("7-Zip not found - install it from 7-zip.org")
+    dest.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([exe, "x", "-y", "-o" + str(dest), str(archive)],
+                       capture_output=True, creationflags=_NOWIN)
+    if r.returncode != 0:
+        raise RuntimeError("extract failed: "
+                           + r.stderr.decode(errors="replace")[:200])
+
+
+def _amiga_dirs(cfg):
+    base = Path(cfg["emulators_root"]) / "amiga"
+    return base / "whdboot", base / "kickstarts", base / "cache"
+
+
+def _sync_kickstarts(cfg):
+    """Identify roms in the kickstarts folder, stage them for WHDLoad.
+    Returns (found: name->path, best: Path|None)."""
+    whdboot, ksdir, _cache = _amiga_dirs(cfg)
+    devs = whdboot / "Devs" / "Kickstarts"
+    devs.mkdir(parents=True, exist_ok=True)
+    found, best = {}, None
+    if not ksdir.is_dir():
+        return found, best
+    for p in sorted(ksdir.iterdir()):
+        if not p.is_file() or p.stat().st_size > 4 * 1024 * 1024:
+            continue
+        data = p.read_bytes()
+        if data[:11] == b"AMIROMTYPE1":
+            continue                      # Cloanto-encrypted, needs rom.key
+        name = KICK_CRCS.get(zlib.crc32(data) & 0xFFFFFFFF)
+        if name:
+            found[name] = p
+            tgt = devs / name
+            if not tgt.exists():
+                shutil.copy2(p, tgt)
+        elif best is None and len(data) in (262144, 524288):
+            best = p                      # unknown dump, still usable to boot
+    for pref in ("kick40068.A1200", "kick39106.A1200", "kick40068.A4000",
+                 "kick40063.A600", "kick37175.A500", "kick34005.A500",
+                 "kick33180.A500"):
+        if pref in found:
+            best = found[pref]
+            break
+    return found, best
+
+
+def _ensure_whdload_bin(whdboot):
+    target = whdboot / "C" / "WHDLoad"
+    if target.is_file():
+        return
+    (whdboot / "C").mkdir(parents=True, exist_ok=True)
+    lha = whdboot / "_WHDLoad_usr.lha"
+    tmp = whdboot / "_whdload_tmp"
+    req = urllib.request.Request(WHDLOAD_URL, headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        lha.write_bytes(r.read())
+    extract_archive(lha, tmp)
+    src = None
+    for p in tmp.rglob("WHDLoad"):
+        if p.is_file():
+            src = p
+            break
+    if not src:
+        raise RuntimeError("WHDLoad binary not found in downloaded archive")
+    shutil.copy2(src, target)
+    shutil.rmtree(tmp, ignore_errors=True)
+    lha.unlink(missing_ok=True)
+
+
+def _find_slave(d):
+    if not d.is_dir():
+        return None
+    slaves = [p for p in d.rglob("*.[sS]lave") if p.is_file()]
+    slaves.sort(key=lambda p: len(p.parts))
+    return slaves[0] if slaves else None
+
+
+def _vol_name(s):
+    s = re.sub(r"[^A-Za-z0-9_-]", "", s) or "Game"
+    return s[:27]
+
+
+def _amiga_launch(cfg, rom_path, emu):
+    whdboot, ksdir, cache = _amiga_dirs(cfg)
+    ksdir.mkdir(parents=True, exist_ok=True)
+    found, bestrom = _sync_kickstarts(cfg)
+    if not bestrom:
+        return False, ("no Kickstart ROMs - put the Amiga .rom files in "
+                       + str(ksdir) + " (plain dumps, not Cloanto-encrypted) "
+                       "and try again")
+    aga = any(bestrom == found.get(k) for k in AGA_KICKS)
+    conf = {
+        "use_gui": "no",
+        "kickstart_rom_file": str(bestrom),
+        "sound_output": "exact",
+        "sound_stereo": "stereo",
+        "sound_frequency": "44100",
+        "cachesize": "0",
+        "cpu_compatible": "true",
+    }
+    extra = []
+    ext = rom_path.suffix.lower()
+    if ext in (".adf", ".ipf"):
+        rom13 = found.get("kick34005.A500") or bestrom
+        conf.update({
+            "kickstart_rom_file": str(rom13),
+            "cpu_model": "68000", "chipset": "ecs_agnus",
+            "chipset_compatible": "A500",
+            "chipmem_size": "1", "bogomem_size": "2",
+            "floppy0": str(rom_path), "nr_floppies": "1",
+        })
+    else:
+        gamedir = cache / _vol_name(rom_path.stem)
+        slave = _find_slave(gamedir)
+        if not slave:
+            extract_archive(rom_path, gamedir)
+            if ext == ".rar":
+                for inner in list(gamedir.rglob("*.lha")):
+                    extract_archive(inner, gamedir)
+                    inner.unlink(missing_ok=True)
+            slave = _find_slave(gamedir)
+        if not slave:
+            return False, "no WHDLoad .slave found inside " + rom_path.name
+        _ensure_whdload_bin(whdboot)
+        gdata = slave.parent
+        sdir = whdboot / "S"
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "startup-sequence").write_text(
+            "FAILAT 999\ncd DH1:\nC:WHDLoad SLAVE=DH1:" + slave.name
+            + " PRELOAD\n", newline="\n")
+        conf.update({
+            "cpu_model": "68020" if aga else "68000",
+            "chipset": "aga" if aga else "ecs_agnus",
+            "chipset_compatible": "A1200" if aga else "A500",
+            "chipmem_size": "4" if aga else "2",
+            "fastmem_size": "8" if aga else "4",
+            "nr_floppies": "0",
+        })
+        extra = [
+            "filesystem2=rw,DH0:Boot:" + str(whdboot) + ",10",
+            "filesystem2=rw,DH1:" + _vol_name(gdata.name) + ":" + str(gdata) + ",0",
+        ]
+    cache.mkdir(parents=True, exist_ok=True)
+    uae = cache / (_vol_name(rom_path.stem) + ".uae")
+    uae.write_text("\n".join([f"{k}={v}" for k, v in conf.items()] + extra)
+                   + "\n", newline="\n")
+    subprocess.Popen([str(emu), "-f", str(uae)], cwd=str(emu.parent))
+    return True, "launched"
+
+
 # --- state / launch ---------------------------------------------------------
 
 def build_state(cfg, rescan=False):
@@ -653,16 +840,24 @@ def launch_game(cfg, system_id, rom):
     emu = find_emulator(sysdef, cfg)
     if not emu:
         return False, "no emulator found for " + sysdef["name"]
-    args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
-    cmd = (args_tpl
-           .replace("{emu}", str(emu))
-           .replace("{rom}", str(rom_path))
-           .replace("{romname}", rom_path.stem)
-           .replace("{romdir}", str(rom_path.parent)))
-    try:
-        subprocess.Popen(cmd, cwd=str(emu.parent))
-    except OSError as e:
-        return False, str(e)
+    if system_id == "amiga":
+        try:
+            ok, msg = _amiga_launch(cfg, rom_path, emu)
+        except Exception as e:
+            ok, msg = False, str(e)
+        if not ok:
+            return False, msg
+    else:
+        args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
+        cmd = (args_tpl
+               .replace("{emu}", str(emu))
+               .replace("{rom}", str(rom_path))
+               .replace("{romname}", rom_path.stem)
+               .replace("{romdir}", str(rom_path.parent)))
+        try:
+            subprocess.Popen(cmd, cwd=str(emu.parent))
+        except OSError as e:
+            return False, str(e)
     stat = cfg["stats"].setdefault(str(rom_path), {})
     stat["plays"] = stat.get("plays", 0) + 1
     stat["last"] = int(time.time())
