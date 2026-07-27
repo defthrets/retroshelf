@@ -1067,23 +1067,27 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
   mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 85%);
 }
 @keyframes gridmove { from { background-position-y: 0, 0; } to { background-position-y: 0, 46px; } }
-#crt { position: fixed; inset: 0; pointer-events: none; z-index: 95; }
-#crt::before { content: ""; position: absolute; inset: 0;
-  background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,.45) 100%); }
-#crt::after { content: ""; position: absolute; left: 0; right: 0; height: 140px;
-  background: linear-gradient(to bottom, transparent, rgba(255,214,140,.04) 45%,
-              rgba(255,214,140,.07) 50%, rgba(255,214,140,.04) 55%, transparent);
-  animation: sweep 8s linear infinite; }
-@keyframes sweep { from { top: -20%; } to { top: 110%; } }
+/* CRT tube: curved-corner bezel vignette + slow phosphor breathing */
+#crt { position: fixed; inset: 0; pointer-events: none; z-index: 95;
+  border-radius: 22px;
+  box-shadow: inset 0 0 130px rgba(0,0,0,.6), inset 0 0 24px rgba(0,0,0,.5); }
+#crt::before { content: ""; position: absolute; inset: 0; border-radius: 22px;
+  background: radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,.5) 100%); }
+#crt::after { content: ""; position: absolute; inset: 0; border-radius: 22px;
+  background: radial-gradient(ellipse at 50% 42%, rgba(255,214,140,.055), transparent 62%);
+  animation: hum 5.5s ease-in-out infinite; }
+@keyframes hum { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 #stars { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
 .starlayer { position: absolute; top: 0; left: 0; background: transparent;
   animation: twinkle 4s infinite alternate ease-in-out; }
 @keyframes twinkle { from { opacity: .2; } to { opacity: .85; } }
-/* C64 tape-loader colour bars */
-.loadbars { height: 6px; background: repeating-linear-gradient(180deg,
-  #6ec2e8 0 2px, #ffb000 2px 4px, #d33f49 4px 6px, #2a3b8f 6px 8px);
-  background-size: 100% 8px; animation: bars .5s steps(4) infinite; }
-@keyframes bars { to { background-position-y: 8px; } }
+/* slow pulsing phosphor line */
+.pulseline { height: 3px; background: linear-gradient(90deg,
+  transparent, var(--amber) 18%, var(--amber2) 50%, var(--amber) 82%, transparent);
+  animation: pulseline 3.4s ease-in-out infinite; }
+@keyframes pulseline {
+  0%, 100% { opacity: .3; filter: none; }
+  50% { opacity: 1; filter: drop-shadow(0 0 8px rgba(255,176,0,.8)); } }
 #termline { padding: 5px 24px 6px; color: var(--amber); font-size: 19px;
   background: rgba(0,0,0,.35); border-bottom: 1px solid var(--line);
   white-space: nowrap; overflow: hidden;
@@ -1118,7 +1122,14 @@ a:hover { text-shadow: 0 0 8px rgba(255,176,0,.6); }
   50% { transform: translateY(-4px); } }
 /* ---- boot + loading overlays ---- */
 #boot { position: fixed; inset: 0; z-index: 200; background: #060503;
-  padding: 46px; transition: opacity .45s; }
+  padding: 46px; }
+#boot.off { animation: crtoff .55s ease-in forwards; }
+@keyframes crtoff {
+  0% { transform: scaleY(1); filter: brightness(1); opacity: 1; }
+  55% { transform: scaleY(.008); filter: brightness(2.6); opacity: 1;
+        background: #ffd75e; }
+  100% { transform: scaleY(.008) scaleX(.01); filter: brightness(3);
+         opacity: 0; background: #ffd75e; } }
 #boot pre { font-family: VT323, monospace; font-size: 22px; color: var(--amber);
   text-shadow: 0 0 8px rgba(255,176,0,.6); line-height: 1.6; white-space: pre-wrap; }
 #loader { position: fixed; inset: 0; z-index: 150; display: none;
@@ -1143,15 +1154,20 @@ header { position: sticky; top: 0; z-index: 10;
   border-bottom: 1px solid var(--line);
   box-shadow: 0 4px 18px rgba(0,0,0,.5); }
 .bar { display: flex; align-items: center; gap: 22px; padding: 14px 24px 10px; }
-.logo { font-family: 'Press Start 2P', monospace; font-size: 15px; color: var(--amber);
-  white-space: nowrap; cursor: pointer; user-select: none;
-  text-shadow: 0 0 12px rgba(255,176,0,.65); animation: glowpulse 3s ease-in-out infinite; }
-.logo b { font-weight: 400; color: var(--amber2); }
-.logo .cur { animation: blink 1.1s steps(1) infinite; }
-@keyframes glowpulse {
-  0%, 100% { text-shadow: 0 0 12px rgba(255,176,0,.65); }
-  50% { text-shadow: 0 0 20px rgba(255,176,0,.95); }
-}
+.logo { display: flex; align-items: flex-end; gap: 6px; white-space: nowrap;
+  cursor: pointer; user-select: none; }
+.logo pre { margin: 0; font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px; line-height: 1.12; font-weight: 700;
+  background: linear-gradient(90deg, #7a5c00, var(--amber) 28%, var(--amber2) 50%,
+    var(--amber) 72%, #7a5c00);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 4.5s linear infinite;
+  filter: drop-shadow(0 0 7px rgba(255,176,0,.55)); }
+@keyframes shimmer { to { background-position-x: -200%; } }
+.logo .cur { color: var(--amber); font-size: 18px; line-height: 1;
+  animation: blink 1.1s steps(1) infinite;
+  text-shadow: 0 0 10px rgba(255,176,0,.7); }
 .searchwrap { flex: 1; max-width: 520px; position: relative; }
 .searchwrap::before { content: ">"; position: absolute; left: 14px; top: 6px;
   color: var(--dim); font-size: 22px; }
@@ -1225,8 +1241,11 @@ main { max-width: 1020px; margin: 0 auto; padding: 16px 24px 60px;
 .info { min-width: 0; flex: 1; }
 .info .nm { font-size: 26px; color: var(--text); line-height: 1.1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: color .12s, text-shadow .12s; }
-.row:hover .info .nm { color: var(--amber2); text-shadow: 0 0 10px rgba(255,176,0,.5); }
+  transition: color .12s, text-shadow .12s;
+  text-shadow: 1px 0 rgba(255,80,80,.16), -1px 0 rgba(80,220,255,.16); }
+.row:hover .info .nm { color: var(--amber2);
+  text-shadow: 0 0 10px rgba(255,176,0,.5),
+    1px 0 rgba(255,80,80,.25), -1px 0 rgba(80,220,255,.25); }
 .info .sub { font-size: 18px; color: var(--muted); margin-top: 3px;
   display: flex; align-items: center; }
 .playbtn { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--amber);
@@ -1300,7 +1319,9 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
 <div id="sprite"><div class="alien"></div></div>
 <header>
   <div class="bar">
-    <div class="logo" onclick="setTab('games')">RETRO<b>SHELF</b><span class="cur">▮</span></div>
+    <div class="logo" onclick="setTab('games')"><pre>
+█▀█ █▀▀ ▀█▀ █▀█ █▀█ █▀▀ █ █ █▀▀ █   █▀▀
+█▀▄ ██▄  █  █▀▄ █▄█ ▄▄█ █▀█ ██▄ █▄▄ █▀ </pre><span class="cur">▮</span></div>
     <div class="searchwrap">
       <input id="search" placeholder="search games..." oninput="render()" autocomplete="off">
     </div>
@@ -1314,7 +1335,7 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
     <button id="tab-systems" onclick="setTab('systems')">SYSTEMS</button>
     <button id="tab-settings" onclick="setTab('settings')">SETTINGS</button>
   </div>
-  <div class="loadbars"></div>
+  <div class="pulseline"></div>
   <div id="termline">&gt; <span id="termtext"></span><span class="cur">▮</span></div>
   <div class="chips" id="chips"></div>
 </header>
@@ -1324,11 +1345,11 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(255,176,0,.4); }
   <span class="kb">Y</span> rescan <span class="kb">B</span> top</div>
 <div id="snack"></div>
 <div id="loader"><div class="inner">
-  <div class="loadbars" style="margin-bottom:26px"></div>
+  <div class="pulseline" style="margin-bottom:26px"></div>
   <div class="t1">NOW LOADING</div>
   <div class="t2" id="loadname"></div>
   <div class="barwrap"><div class="bar"></div></div>
-  <div class="loadbars" style="margin-top:26px"></div>
+  <div class="pulseline" style="margin-top:26px"></div>
 </div></div>
 <div id="crt"></div>
 <div id="boot"><pre id="boottext"></pre></div>
@@ -1419,8 +1440,8 @@ const BOOT = 'RETROSHELF BIOS v4.0\nMEMORY TEST: 640K OK\nCRT DRIVER ........ OK
     if (i >= BOOT.length) {
       clearInterval(t);
       el.textContent = BOOT;
-      setTimeout(() => { box.style.opacity = '0'; }, 260);
-      setTimeout(() => box.remove(), 750);
+      setTimeout(() => box.classList.add('off'), 300);
+      setTimeout(() => box.remove(), 900);
     }
   }, 16);
 })();
