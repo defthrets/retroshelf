@@ -606,6 +606,7 @@ def start_cover_match(cfg, covers_dir):
 # expects them.
 
 WHDLOAD_URL = "https://whdload.de/whdload/WHDLoad_usr.lha"
+SKICK_URL = "https://aminet.net/util/boot/skick346.lha"   # kickXXXX.RTB tables
 
 KICK_CRCS = {  # well-known Kickstart image checksums -> WHDLoad image name
     0x11F9E62F: "kick33180.A500",    # Kickstart 1.2
@@ -719,6 +720,28 @@ def _ensure_whdload_bin(whdboot):
     lha.unlink(missing_ok=True)
 
 
+def _ensure_rtbs(whdboot):
+    """WHDLoad needs a .RTB relocation table next to each kickstart image.
+    They're freely distributed in the Soft-Kick package on Aminet."""
+    devs = whdboot / "Devs" / "Kickstarts"
+    devs.mkdir(parents=True, exist_ok=True)
+    if list(devs.glob("*.RTB")) or list(devs.glob("*.rtb")):
+        return
+    lha = whdboot / "_skick.lha"
+    tmp = whdboot / "_skick_tmp"
+    req = urllib.request.Request(SKICK_URL, headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        lha.write_bytes(r.read())
+    extract_archive(lha, tmp)
+    for p in tmp.rglob("*"):
+        if p.is_file() and p.suffix.lower() == ".rtb":
+            tgt = devs / p.name
+            if not tgt.exists():
+                shutil.copy2(p, tgt)
+    shutil.rmtree(tmp, ignore_errors=True)
+    lha.unlink(missing_ok=True)
+
+
 def _find_slave(d):
     if not d.is_dir():
         return None
@@ -774,6 +797,7 @@ def _amiga_launch(cfg, rom_path, emu):
         if not slave:
             return False, "no WHDLoad .slave found inside " + rom_path.name
         _ensure_whdload_bin(whdboot)
+        _ensure_rtbs(whdboot)
         gdata = slave.parent
         sdir = whdboot / "S"
         sdir.mkdir(parents=True, exist_ok=True)
