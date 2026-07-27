@@ -1828,19 +1828,40 @@ refresh();
 
 def main():
     url = f"http://127.0.0.1:{PORT}"
+    server = None
     try:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"RetroShelf running at {url}")
     except OSError:
-        # already running (e.g. the exe was double-clicked twice) — just open it
-        webbrowser.open(url)
-        return
-    print(f"RetroShelf running at {url}  (Ctrl+C to quit)")
-    if "--no-browser" not in sys.argv:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        pass    # already running — just open another window/tab on it
+
+    if "--no-browser" in sys.argv:        # dev: server only
+        if not server:
+            return
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            return
+
+    # native app window (Edge WebView2); --browser falls back to the old tab
+    if "--browser" not in sys.argv:
+        try:
+            import webview
+            webview.create_window(
+                "RetroShelf", url, width=1280, height=840,
+                min_size=(900, 600), background_color="#0a0906")
+            webview.start()
+            return
+        except Exception:
+            pass    # no WebView2 runtime — fall through to browser
+
+    webbrowser.open(url)
+    if server:
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
