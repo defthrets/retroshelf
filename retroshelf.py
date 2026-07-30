@@ -860,7 +860,7 @@ def _libretro_index(sysdir, kind):
     req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
     with urllib.request.urlopen(req, timeout=30) as r:
         html = r.read().decode("utf-8", "replace")
-    exact, nospace, byletter = {}, {}, {}
+    exact, nospace, byletter, coll, abbrev = {}, {}, {}, {}, {}
     for href in re.findall(r'href="([^"]+\.png)"', html):
         fname = urllib.parse.unquote(href.rsplit("/", 1)[-1])
         key = norm_title(fname[:-4])
@@ -869,8 +869,12 @@ def _libretro_index(sysdir, kind):
         if key not in exact:
             exact[key] = fname
             nospace.setdefault(key.replace(" ", ""), fname)
+            ck = collapse_initials(key)
+            coll.setdefault(ck, fname)
+            if ck != key:            # the title is an initialism, e.g. O.D.T.
+                abbrev.setdefault(ck, fname)
             byletter.setdefault(key[:1], []).append(key)
-    return exact, nospace, byletter
+    return exact, nospace, byletter, coll, abbrev
 
 
 def loose_key(key, keys):
@@ -890,8 +894,14 @@ def loose_key(key, keys):
 
 
 def _libretro_match(key, index):
-    exact, nospace, byletter = index
-    hit = exact.get(key) or nospace.get(key.replace(" ", ""))
+    exact, nospace, byletter, coll, abbrev = index
+    ck = collapse_initials(key)
+    hit = (exact.get(key) or nospace.get(key.replace(" ", "")) or coll.get(ck))
+    if not hit:
+        # "O.D.T." on their side vs "ODT Escape Or Die Trying" on ours
+        first = ck.split(" ")[0]
+        if len(first) >= 3:
+            hit = abbrev.get(first)
     if not hit:
         close = difflib.get_close_matches(key, byletter.get(key[:1], []),
                                           n=1, cutoff=0.87)
@@ -1172,6 +1182,15 @@ def start_meta():
     return True, "metadata download started"
 
 
+_INITIALS_RE = re.compile(r"\b(?:[a-z0-9] )+[a-z0-9]\b")
+
+
+def collapse_initials(s):
+    """"O.D.T." normalises to "o d t" while a rom named "ODT" gives "odt".
+    Joining runs of single characters makes the two forms meet."""
+    return _INITIALS_RE.sub(lambda m: m.group(0).replace(" ", ""), s)
+
+
 def _tokkey(s):
     return " ".join(sorted(s.split()))
 
@@ -1190,6 +1209,7 @@ def meta_lookup(sysid, name):
         for k in idx:
             nospace.setdefault(k.replace(" ", ""), k)
             toks.setdefault(_tokkey(k), k)
+            toks.setdefault(collapse_initials(k), k)
         entry = (idx, nospace, toks, list(idx.keys()))
         with _meta_lock:
             _meta_index[sysid] = entry
@@ -1199,7 +1219,8 @@ def meta_lookup(sysid, name):
     key = norm_title(name)
     if key in idx:
         return idx[key]
-    for alt in (nospace.get(key.replace(" ", "")), toks.get(_tokkey(key))):
+    for alt in (nospace.get(key.replace(" ", "")), toks.get(_tokkey(key)),
+                toks.get(collapse_initials(key))):
         if alt:
             return idx[alt]
     close = difflib.get_close_matches(key, keys, n=1, cutoff=0.9)
