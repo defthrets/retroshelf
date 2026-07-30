@@ -1867,26 +1867,89 @@ def quarantine(cfg, paths):
     return moved, failed
 
 
+# Gamepad mapping DuckStation's own setup wizard would write for the first
+# SDL controller (Xbox layout: A=bottom, B=right, X=left, Y=top).
+DUCKSTATION_PAD1 = """[Pad1]
+Type = AnalogController
+Up = SDL-0/DPadUp
+Down = SDL-0/DPadDown
+Left = SDL-0/DPadLeft
+Right = SDL-0/DPadRight
+Cross = SDL-0/A
+Circle = SDL-0/B
+Square = SDL-0/X
+Triangle = SDL-0/Y
+Select = SDL-0/Back
+Start = SDL-0/Start
+L1 = SDL-0/LeftShoulder
+R1 = SDL-0/RightShoulder
+L2 = SDL-0/+LeftTrigger
+R2 = SDL-0/+RightTrigger
+L3 = SDL-0/LeftStick
+R3 = SDL-0/RightStick
+Analog = SDL-0/Guide
+LLeft = SDL-0/-LeftX
+LRight = SDL-0/+LeftX
+LUp = SDL-0/-LeftY
+LDown = SDL-0/+LeftY
+RLeft = SDL-0/-RightX
+RRight = SDL-0/+RightX
+RUp = SDL-0/-RightY
+RDown = SDL-0/+RightY
+LargeMotor = SDL-0/LargeMotor
+SmallMotor = SDL-0/SmallMotor
+"""
+
+
+def _ini_section(text, name):
+    """Return (start, end) of an ini section body including its header."""
+    head = "[" + name + "]"
+    start = text.find(head)
+    if start == -1:
+        return None
+    nxt = text.find("\n[", start + len(head))
+    return (start, len(text) if nxt == -1 else nxt + 1)
+
+
+def _set_ini_key(text, section, key, value):
+    span = _ini_section(text, section)
+    line = key + " = " + value
+    if not span:
+        return text.rstrip("\n") + "\n\n[" + section + "]\n" + line + "\n"
+    body = text[span[0]:span[1]]
+    pat = re.compile(r"(?m)^" + re.escape(key) + r"\s*=.*$")
+    if pat.search(body):
+        body = pat.sub(line, body, count=1)
+    else:
+        body = body.rstrip("\n") + "\n" + line + "\n"
+    return text[:span[0]] + body + text[span[1]:]
+
+
 def prep_emulator(sysid, emu):
     """First-run tweaks so a freshly downloaded emulator boots games directly
-    instead of stopping at its setup wizard."""
+    instead of stopping at its setup wizard - which is also where it would
+    have bound the gamepad, so that has to be done here too."""
     if not emu:
         return
     base = emu.parent
     if sysid == "ps1":
         ini = base / "settings.ini"
         try:
-            if not ini.exists():
-                ini.write_text("[Main]\nSetupWizardIncomplete = false\n\n"
-                               "[BIOS]\nSearchDirectory = bios\n",
-                               encoding="utf-8")
-            else:
-                t = ini.read_text(encoding="utf-8", errors="replace")
-                if "SetupWizardIncomplete" not in t and "[Main]" in t:
-                    ini.write_text(
-                        t.replace("[Main]\n",
-                                  "[Main]\nSetupWizardIncomplete = false\n", 1),
-                        encoding="utf-8")
+            text = ini.read_text(encoding="utf-8", errors="replace") \
+                if ini.exists() else "[Main]\n"
+            if "SetupWizardIncomplete" not in text:
+                text = _set_ini_key(text, "Main", "SetupWizardIncomplete", "false")
+            text = _set_ini_key(text, "BIOS", "SearchDirectory", "bios")
+            text = _set_ini_key(text, "InputSources", "SDL", "true")
+            # bind the first gamepad unless the user has mapped one already
+            span = _ini_section(text, "Pad1")
+            pad = text[span[0]:span[1]] if span else ""
+            if "SDL-" not in pad and "XInput-" not in pad:
+                if span:
+                    text = text[:span[0]] + DUCKSTATION_PAD1 + "\n" + text[span[1]:]
+                else:
+                    text = text.rstrip("\n") + "\n\n" + DUCKSTATION_PAD1
+            ini.write_text(text, encoding="utf-8")
         except OSError:
             pass
 
