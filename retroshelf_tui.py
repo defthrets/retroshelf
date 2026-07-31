@@ -10,6 +10,12 @@ an 80x24 screen. Two ways to run it:
     Choosing a game launches it on the homelab, which is where the emulator,
     the discs and the graphics power are.
 
+  Browse remote, play here   the collection lives on the homelab, the
+                             emulator runs on this machine, which has a screen
+      thinkpad$ python3 retroshelf_tui.py --host homelab --play-here \
+                        --map /mnt/oldgames=/media/games
+    Drop --map if the games are mounted at the same path on both machines.
+
   Local                  everything on this machine
       python3 retroshelf_tui.py --local
 
@@ -107,6 +113,61 @@ class Remote:
 
     def where(self):
         return self.base
+
+
+class Hybrid:
+    """Browse a remote library, but run the game on this machine.
+
+    The homelab keeps the collection, the artwork and the play counts; the
+    emulator runs here, where there is a screen. Use --map when the games are
+    mounted at a different path locally, e.g.
+        --map /mnt/oldgames=/media/games
+    """
+
+    kind = "browse remote, play here"
+
+    def __init__(self, remote, mappings):
+        self.remote = remote
+        self.maps = mappings
+        sys.path.insert(0, str(HERE))
+        import retroshelf as rs           # noqa: E402
+        self.rs = rs
+
+    def _localise(self, path):
+        for src, dst in self.maps:
+            if path.startswith(src):
+                path = dst + path[len(src):]
+                break
+        return path.replace("\\", "/")
+
+    def state(self, rescan=False):
+        return self.remote.state(rescan)
+
+    def details(self, game):
+        return self.remote.details(game)
+
+    def favourite(self, game, on):
+        self.remote.favourite(game, on)
+
+    def launch(self, game):
+        rom = self._localise(game["file"])
+        if not Path(rom).exists():
+            return False, (f"{rom} is not readable here - mount the games "
+                           "folder, or pass --map remote=local")
+        cfg = self.rs.load_config()
+        try:
+            ok, msg = self.rs.launch_game(cfg, game["sysId"], rom)
+        except Exception as e:
+            return False, str(e)
+        if ok:                     # keep the homelab's play count in step
+            try:
+                self.remote._post("/api/meta", {"rom": game["file"]}, timeout=10)
+            except Exception:
+                pass
+        return ok, msg
+
+    def where(self):
+        return self.remote.base + " (playing here)"
 
 
 class Local:
@@ -461,7 +522,21 @@ def main():
     else:
         host = arg("--host")
         if host:
-            backend = Remote(host, int(arg("--port", DEFAULT_PORT)))
+            remote = Remote(host, int(arg("--port", DEFAULT_PORT)))
+            if has("--play-here"):
+                maps = []
+                for i, a in enumerate(sys.argv):
+                    val = None
+                    if a == "--map" and i + 1 < len(sys.argv):
+                        val = sys.argv[i + 1]
+                    elif a.startswith("--map="):
+                        val = a.split("=", 1)[1]
+                    if val and "=" in val:
+                        src, _, dst = val.partition("=")
+                        maps.append((src.rstrip("/"), dst.rstrip("/")))
+                backend = Hybrid(remote, maps)
+            else:
+                backend = remote
         else:
             # no host given: try a server on this machine, else run standalone
             try:

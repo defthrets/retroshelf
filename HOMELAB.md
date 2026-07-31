@@ -224,3 +224,47 @@ The first downloads the games database (~100 MB, once) for descriptions and
 ratings; the second fetches covers and screenshots. Progress shows in
 `/api/state` under `meta` and `shots`. Covers do not matter in the terminal,
 but the descriptions show up in the details line.
+
+## 8. Where should the emulator actually run?
+
+The homelab is headless, so anything it launches has nowhere to draw. Three
+ways out, in the order they are worth trying:
+
+**Play on the terminal machine (recommended).** The homelab keeps the
+collection, artwork and play counts; the emulator runs where there is a
+screen. A Core 2 Duo laptop handles Amiga, SNES, NES, Mega Drive and
+PlayStation comfortably.
+
+```bash
+# on the ThinkPad: mount the games, install RetroArch, get the cores
+sudo mount -t cifs //192.168.1.253/mnt /media/homelab -o guest,ro,uid=1000
+sudo apt install -y retroarch
+python3 ~/retroshelf/retroshelf.py --serve --no-browser &   # local, for cores
+curl -s -XPOST http://localhost:7830/api/cores -d '{}' -H 'Content-Type: application/json'
+
+# browse the homelab's library, play here
+python3 ~/retroshelf/retroshelf_tui.py --host 192.168.1.253 --play-here         --map /mnt/oldgames=/media/homelab/oldgames
+```
+
+`--map` translates the server's paths to wherever they are mounted locally;
+leave it out if both machines see the same path.
+
+**Give the homelab a display.** A virtual X server plus VNC, if you would
+rather the homelab do the work:
+
+```bash
+sudo apt install -y xvfb x11vnc
+Xvfb :99 -screen 0 1280x720x24 &
+x11vnc -display :99 -forever -nopw -localhost &   # then ssh -L 5900:localhost:5900
+DISPLAY=:99 python3 ~/retroshelf/retroshelf.py --serve --host 0.0.0.0
+```
+
+Everything launched will render on `:99`. Software rendering only, so 2D
+systems are fine and 3D ones will not be.
+
+**X11 forwarding** (`ssh -X thinkpad -> homelab`) works for simple SDL
+emulators but uses indirect GLX, which most modern emulators either refuse or
+run at a crawl. Quick to try, rarely the answer.
+
+Note that a play being logged only means the emulator process started — it is
+not proof anything appeared on a screen.
