@@ -51,11 +51,22 @@ from its file extension, using folder names as hints — so
 `/srv/games/ps1/…`, `/srv/games/n64/…`, `/srv/games/amiga/…` is ideal, but any
 layout works.
 
-**The games must be readable on this machine.** Either copy them over, or
-mount the Windows share, e.g. in `/etc/fstab`:
+**The games must be readable on this machine — as a local path, not a network
+mount of itself.** If this box already serves the games over SMB (the Windows
+PC has `M:` mapped to `\\this-box\mnt`), then they are local here: point
+`library_root` at the directory behind that share, e.g. `/mnt/oldgames`.
+Find it with:
+
+```bash
+testparm -s 2>/dev/null | grep -A3 '^\[mnt\]'     # samba share -> real path
+ls /mnt/oldgames
+```
+
+Only if the games really live on another machine do you need a mount, e.g. in
+`/etc/fstab`:
 
 ```
-//192.168.1.x/oldgames  /srv/games  cifs  guest,ro,uid=1000,iocharset=utf8,_netdev  0  0
+//192.168.1.x/share  /srv/games  cifs  guest,ro,uid=1000,iocharset=utf8,_netdev  0  0
 ```
 
 ## 3. Emulators
