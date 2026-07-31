@@ -433,6 +433,42 @@ def _find_emulator_uncached(sysdef, cfg, override):
 
 TAG_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]")
 
+# region and language markers as they appear in rom filenames
+REGION_TAGS = [
+    ("world", "World"), ("usa", "USA"), ("(u)", "USA"), ("[u]", "USA"),
+    ("(us", "USA"), ("europe", "Europe"), ("(e)", "Europe"), ("[e]", "Europe"),
+    ("(eu", "Europe"), ("japan", "Japan"), ("(j)", "Japan"), ("[j]", "Japan"),
+    ("korea", "Korea"), ("china", "China"), ("taiwan", "Taiwan"),
+    ("germany", "Germany"), ("france", "France"), ("italy", "Italy"),
+    ("spain", "Spain"), ("netherlands", "Netherlands"), ("sweden", "Sweden"),
+    ("norway", "Norway"), ("denmark", "Denmark"), ("finland", "Finland"),
+    ("australia", "Australia"), ("canada", "Canada"), ("brazil", "Brazil"),
+    ("russia", "Russia"), ("poland", "Poland"), ("asia", "Asia"),
+]
+LANG_CODES = {"En": "English", "Fr": "French", "De": "German", "Es": "Spanish",
+              "It": "Italian", "Ja": "Japanese", "Nl": "Dutch", "Pt": "Portuguese",
+              "Sv": "Swedish", "No": "Norwegian", "Da": "Danish", "Fi": "Finnish",
+              "Zh": "Chinese", "Ko": "Korean", "Ru": "Russian", "Pl": "Polish",
+              "Cs": "Czech", "Hu": "Hungarian", "El": "Greek", "Tr": "Turkish"}
+LANG_RE = re.compile(r"[\(\[]((?:[A-Z][a-z])(?:\s*,\s*[A-Z][a-z])*)[\)\]]")
+
+
+def parse_region(name):
+    low = name.lower()
+    for tag, label in REGION_TAGS:
+        if tag in low:
+            return label
+    return ""
+
+
+def parse_langs(name):
+    out = []
+    for m in LANG_RE.finditer(name):
+        for code in (c.strip() for c in m.group(1).split(",")):
+            if code in LANG_CODES and code not in out:
+                out.append(code)
+    return out
+
 
 def clean_name(stem):
     n = TAG_RE.sub("", stem)
@@ -596,6 +632,8 @@ def scan_all(cfg):
                 "name": clean_name(stem),
                 "file": str(p),
                 "size": sizes.get(fname, 0),
+                "region": parse_region(fname),
+                "langs": parse_langs(fname),
                 "art": has_art(sysid, dp, stem, "cover"),
                 "shot": has_art(sysid, dp, stem, "screen"),
             })
@@ -1740,6 +1778,10 @@ def collapse_versions(gl):
         items = sorted(groups[key], key=rank)
         best = dict(items[0])
         best["copies"] = len(items)
+        # filters look across every copy, so a title with a Japanese release
+        # still shows under Japan even when the default copy is the US one
+        best["regions"] = sorted({g.get("region") for g in items if g.get("region")})
+        best["langs"] = sorted({l for g in items for l in g.get("langs", [])})
         if len(items) > 1:
             # art may sit on any of the copies; play counts belong to the title
             withart = next((g for g in items if g["art"]), None)
@@ -2618,6 +2660,13 @@ header { flex-shrink: 0; background: rgba(8,6,14,.94); border-bottom: 1px solid 
 .tbtn:hover { border-color: var(--dim); color: var(--amber2); }
 .tbtn.on { background: var(--amber); color: #08060e; border-color: var(--amber);
   box-shadow: 0 0 12px rgba(var(--glow),.45); }
+.tsel { background: rgba(0,0,0,.35); border: 1px solid var(--line); color: var(--text);
+  font: inherit; font-size: 17px; padding: 3px 6px; border-radius: 4px;
+  cursor: pointer; max-width: 190px; }
+.tsel:hover { border-color: var(--dim); color: var(--amber2); }
+.tsel.on { border-color: var(--amber); color: var(--amber);
+  box-shadow: 0 0 10px rgba(var(--glow),.35); }
+.tsel option { background: var(--panel); color: var(--text); }
 #toolbar .sp { margin-left: auto; color: var(--muted); font-size: 17px; }
 #view { flex: 1; overflow-y: auto; padding: 16px; }
 /* grid */
@@ -2867,6 +2916,10 @@ button.outlined:hover { box-shadow: 0 0 12px rgba(var(--glow),.4); }
       <button class="tbtn" id="v-grid" onclick="setView('grid')">▦ GRID</button>
       <button class="tbtn" id="v-list" onclick="setView('list')">☰ LIST</button>
       <button class="tbtn" onclick="cycleSort()" id="sortbtn">SORT: NAME</button>
+      <select class="tsel" id="fregion" onchange="setFilter('region',this.value)"></select>
+      <select class="tsel" id="flang" onchange="setFilter('lang',this.value)"></select>
+      <button class="tbtn" id="fclear" onclick="clearFilters()"
+        style="display:none">CLEAR</button>
       <button class="tbtn" onclick="snack('RESCANNING...');refresh(true)">⟳ RESCAN</button>
       <span class="sp" id="shown"></span>
     </div>
@@ -2894,6 +2947,8 @@ let tab = 'games';
 let sel = 'all';
 let view = localStorage.getItem('rs_view') || 'grid';
 let sortMode = localStorage.getItem('rs_sort') || 'name';
+let fRegion = localStorage.getItem('rs_fregion') || '';
+let fLang = localStorage.getItem('rs_flang') || '';
 let shown = 300;
 let curGame = null;
 let curList = [];
@@ -3009,6 +3064,40 @@ function cycleSort(){
   localStorage.setItem('rs_sort',sortMode); render();
 }
 function onSearch(){ shown=300; render(); }
+const LANG_NAMES={En:'English',Fr:'French',De:'German',Es:'Spanish',It:'Italian',
+  Ja:'Japanese',Nl:'Dutch',Pt:'Portuguese',Sv:'Swedish',No:'Norwegian',Da:'Danish',
+  Fi:'Finnish',Zh:'Chinese',Ko:'Korean',Ru:'Russian',Pl:'Polish',Cs:'Czech',
+  Hu:'Hungarian',El:'Greek',Tr:'Turkish'};
+function setFilter(kind,val){
+  if(kind==='region') fRegion=val; else fLang=val;
+  localStorage.setItem('rs_f'+kind,val);
+  shown=300; render();
+}
+function clearFilters(){
+  fRegion=''; fLang='';
+  localStorage.removeItem('rs_fregion'); localStorage.removeItem('rs_flang');
+  shown=300; render();
+}
+function buildFilterMenus(pool){
+  // options come from what is actually in the library, with counts
+  const rc={}, lc={};
+  for(const g of pool){
+    for(const r of (g.regions&&g.regions.length?g.regions:['?'])) rc[r]=(rc[r]||0)+1;
+    for(const l of (g.langs&&g.langs.length?g.langs:[])) lc[l]=(lc[l]||0)+1;
+  }
+  const rsel=document.getElementById('fregion'), lsel=document.getElementById('flang');
+  const regions=Object.keys(rc).filter(r=>r!=='?').sort((a,b)=>rc[b]-rc[a]);
+  rsel.innerHTML=`<option value="">REGION: ANY</option>`
+    + regions.map(r=>`<option value="${esc(r)}"${fRegion===r?' selected':''}>${esc(r)} (${rc[r]})</option>`).join('')
+    + (rc['?']?`<option value="?"${fRegion==='?'?' selected':''}>Untagged (${rc['?']})</option>`:'');
+  const langs=Object.keys(lc).sort((a,b)=>lc[b]-lc[a]);
+  lsel.style.display=langs.length?'':'none';
+  lsel.innerHTML=`<option value="">LANGUAGE: ANY</option>`
+    + langs.map(l=>`<option value="${esc(l)}"${fLang===l?' selected':''}>${esc(LANG_NAMES[l]||l)} (${lc[l]})</option>`).join('');
+  rsel.classList.toggle('on',!!fRegion);
+  lsel.classList.toggle('on',!!fLang);
+  document.getElementById('fclear').style.display=(fRegion||fLang)?'':'none';
+}
 
 function snack(msg){
   const t=document.getElementById('snack'); t.textContent='> '+msg;
@@ -3051,6 +3140,10 @@ function currentGames(){
   else if(sel==='recent') games=allGames().filter(g=>g.last).sort((a,b)=>b.last-a.last);
   else { const s=state.systems.find(x=>x.id===sel)||{games:[],name:''};
          games=s.games.map(g=>({...g,sysId:s.id,sysName:s.name})); }
+  buildFilterMenus(games);
+  if(fRegion) games=games.filter(g=> fRegion==='?'
+    ? !(g.regions&&g.regions.length) : (g.regions||[]).includes(fRegion));
+  if(fLang) games=games.filter(g=>(g.langs||[]).includes(fLang));
   const q=document.getElementById('search').value.trim().toLowerCase();
   if(q) games=games.filter(g=>g.name.toLowerCase().includes(q));
   if(sel!=='recent'){
@@ -3225,6 +3318,8 @@ function renderDetails(){
     ${genresHtml(d)}
     <table class="meta">
       <tr><td>Platform</td><td>${esc(g.sysName||'')}</td></tr>
+      ${(g.regions&&g.regions.length)?`<tr><td>Region</td><td>${esc(g.regions.join(', '))}</td></tr>`:''}
+      ${(g.langs&&g.langs.length)?`<tr><td>Languages</td><td>${esc(g.langs.map(l=>LANG_NAMES[l]||l).join(', '))}</td></tr>`:''}
       ${metaRows(d)}
       <tr><td>Play count</td><td>${g.plays||0}</td></tr>
       <tr><td>Last played</td><td>${g.last?esc(ago(g.last)):'never'}</td></tr>
