@@ -83,10 +83,10 @@ instance.
 
 - Config and play stats live next to the script in `retroshelf.json`
   (gitignored).
-- The server binds to 127.0.0.1 only. Scans are cached for 2 minutes; the
-  RESCAN chip forces a fresh scan.
-- Amiga: WinUAE needs your Kickstart ROMs configured once; `.adf` disks launch
-  directly, WHDLoad `.lha`/`.rar` archives need a one-time WinUAE setup.
+- The server binds to 127.0.0.1 unless `--host` says otherwise. Scans are
+  cached briefly; the RESCAN button forces a fresh scan.
+- Amiga: put Kickstart ROMs in `bios/amiga/` (or `emulators/amiga/kickstarts/`);
+  WHDLoad archives are booted automatically.
 
 ## Terminal version (old hardware, SSH, headless)
 
