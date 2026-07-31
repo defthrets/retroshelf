@@ -25,6 +25,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import zlib
 import subprocess
@@ -163,6 +164,33 @@ SYSTEMS = [
              "for best coverage. Launch args are managed automatically."},
 ]
 
+# Emulator commands to look for on Linux/macOS, in preference order. Anything
+# on PATH is used as-is, so a homelab box just needs the packages installed.
+POSIX_BINS = {
+    "nes": ["mesen", "fceux", "nestopia"],
+    "snes": ["snes9x-gtk", "snes9x", "bsnes", "zsnes"],
+    "n64": ["simple64-gui", "mupen64plus-gui", "mupen64plus"],
+    "gb": ["mgba-qt", "mgba", "visualboyadvance-m", "sameboy"],
+    "gba": ["mgba-qt", "mgba", "visualboyadvance-m"],
+    "nds": ["melonDS", "melonds", "desmume"],
+    "gamecube": ["dolphin-emu", "dolphin-emu-nogui"],
+    "wii": ["dolphin-emu", "dolphin-emu-nogui"],
+    "genesis": ["blastem", "ares", "mednafen"],
+    "dreamcast": ["flycast", "reicast"],
+    "ps1": ["duckstation-qt", "duckstation-nogui", "duckstation", "mednafen"],
+    "ps2": ["pcsx2-qt", "PCSX2", "pcsx2"],
+    "psp": ["PPSSPPSDL", "PPSSPPQt", "ppsspp"],
+    "arcade": ["mame", "mame64"],
+    "atari2600": ["stella", "mednafen"],
+    "c64": ["x64sc", "x64", "vice"],
+    "amiga": ["fs-uae", "amiberry"],
+    "3do": ["retroarch"],
+}
+# systems that need a libretro core rather than a standalone emulator
+POSIX_CORE_ARGS = {
+    "3do": '{emu} -L opera_libretro.so "{rom}" -f',
+}
+
 SYSTEMS_BY_ID = {s["id"]: s for s in SYSTEMS}
 ART_EXTS = [".png", ".jpg", ".jpeg", ".webp"]
 
@@ -280,6 +308,26 @@ def save_config(cfg):
         _cfg_cache.update(mtime=None, data=cfg)
 
 
+def _find_emulator_posix(sysdef, cfg):
+    """On Linux/macOS an emulator is normally a package on PATH; also accept a
+    binary or AppImage dropped into the emulators folder."""
+    sysid = sysdef["id"]
+    emu_dir = Path(cfg["emulators_root"]) / sysid
+    names = POSIX_BINS.get(sysid, [])
+    if emu_dir.is_dir():
+        for p in sorted(emu_dir.rglob("*")):
+            if not p.is_file() or not os.access(p, os.X_OK):
+                continue
+            low = p.name.lower()
+            if low in [n.lower() for n in names] or low.endswith(".appimage"):
+                return p
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
+
+
 _emu_cache = {}
 
 
@@ -300,6 +348,8 @@ def _find_emulator_uncached(sysdef, cfg, override):
     if override:
         p = Path(override)
         return p if p.is_file() else None
+    if os.name != "nt":
+        return _find_emulator_posix(sysdef, cfg)
     emu_dir = Path(cfg["emulators_root"]) / sysdef["id"]
     if not emu_dir.is_dir():
         return None
@@ -2083,6 +2133,8 @@ def launch_game(cfg, system_id, rom):
             except Exception as e:
                 return False, str(e)
         args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
+        if os.name != "nt" and system_id in POSIX_CORE_ARGS:
+            args_tpl = POSIX_CORE_ARGS[system_id]
         cmd = (args_tpl
                .replace("{emu}", str(emu))
                .replace("{emudir}", str(emu.parent))
@@ -2090,7 +2142,9 @@ def launch_game(cfg, system_id, rom):
                .replace("{romname}", play_path.stem)
                .replace("{romdir}", str(play_path.parent)))
         try:
-            subprocess.Popen(cmd, cwd=str(emu.parent))
+            # a string command line is Windows-only; POSIX needs an argv list
+            popen_cmd = cmd if os.name == "nt" else shlex.split(cmd)
+            subprocess.Popen(popen_cmd, cwd=str(emu.parent))
         except OSError as e:
             return False, str(e)
     stat = cfg["stats"].setdefault(str(rom_path), {})
@@ -3577,18 +3631,35 @@ refresh();
 """
 
 
+def _arg(name, default=None):
+    """Read --name value or --name=value from the command line."""
+    for i, a in enumerate(sys.argv):
+        if a == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return default
+
+
 def main():
-    url = f"http://127.0.0.1:{PORT}"
+    host = _arg("--host", "127.0.0.1")
+    port = int(_arg("--port", PORT))
+    # --serve runs headless (no window), for a homelab box driven from elsewhere
+    headless = "--serve" in sys.argv or "--no-browser" in sys.argv
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}"
     server = None
     try:
-        server = Server(("127.0.0.1", PORT), Handler)
+        server = Server((host, port), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         threading.Thread(target=_watch_worker, daemon=True).start()
         print(f"RetroShelf running at {url}")
+        if host not in ("127.0.0.1", "localhost"):
+            print(f"Listening on {host}:{port} - reachable from the network. "
+                  "Anyone who can reach it can launch games on this machine.")
     except OSError:
         pass    # already running — just open another window/tab on it
 
-    if "--no-browser" in sys.argv:        # dev: server only
+    if headless:        # server only: dev, or a homelab host
         if not server:
             return
         try:

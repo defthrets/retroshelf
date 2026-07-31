@@ -87,3 +87,41 @@ instance.
   RESCAN chip forces a fresh scan.
 - Amiga: WinUAE needs your Kickstart ROMs configured once; `.adf` disks launch
   directly, WHDLoad `.lha`/`.rar` archives need a one-time WinUAE setup.
+
+## Terminal version (old hardware, SSH, headless)
+
+`retroshelf_tui.py` is the same library in a curses interface — stdlib only,
+no desktop, fits an 80x24 screen. Copy `retroshelf.py` and `retroshelf_tui.py`
+together; Python 3 is the only requirement.
+
+**Thin client + homelab** — the terminal browses, the homelab runs the games:
+
+```
+homelab$   python3 retroshelf.py --serve --host 0.0.0.0
+thinkpad$  python3 retroshelf_tui.py --host homelab
+```
+
+Choosing a game launches it on the homelab, where the emulators, discs and
+graphics power live. `--host 0.0.0.0` puts the API on your LAN — anyone who
+can reach it can start games on that box, so keep it to a trusted network.
+
+**Standalone** on one machine: `python3 retroshelf_tui.py --local`
+
+Without flags it uses a server on this machine if one is running, otherwise
+it scans locally.
+
+Keys: arrows or `j`/`k` move, `tab` switches pane, `/` search, `enter` plays,
+`f` favourite, `r` rescan, `q` quit.
+
+Scriptable modes, no UI:
+
+```
+python3 retroshelf_tui.py --list                 # print the library
+python3 retroshelf_tui.py --list --system ps1
+python3 retroshelf_tui.py --play "metal gear"    # launch by name
+```
+
+On Linux and macOS emulators are found on `PATH` (mgba, snes9x-gtk,
+mupen64plus, duckstation-qt, pcsx2-qt, dolphin-emu, flycast, mame, stella,
+x64sc, fs-uae, ppsspp, retroarch), or you can drop a binary or AppImage into
+`emulators/<system>/`.
