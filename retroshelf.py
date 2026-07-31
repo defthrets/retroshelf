@@ -874,7 +874,8 @@ def _libretro_index(sysdir, kind):
             if ck != key:            # the title is an initialism, e.g. O.D.T.
                 abbrev.setdefault(ck, fname)
             byletter.setdefault(key[:1], []).append(key)
-    return exact, nospace, byletter, coll, abbrev
+    toksets = [(k, frozenset(collapse_initials(k).split())) for k in exact]
+    return exact, nospace, byletter, coll, abbrev, toksets
 
 
 def loose_key(key, keys):
@@ -893,8 +894,34 @@ def loose_key(key, keys):
     return min(cands, key=len) if cands else None
 
 
+def subset_match(key, toksets):
+    """Match titles that differ by word order or by extra words, e.g. a rom
+    called "Madden 2000" against "Madden NFL 2000", or "N64 1080 Snowboarding"
+    against "1080 Snowboarding". One side's words must all appear in the
+    other's, and the overlap has to be substantial enough to be meaningful."""
+    ours = frozenset(collapse_initials(key).split())
+    if not ours:
+        return None
+    best, best_gap = None, None
+    for k, theirs in toksets:
+        if not (ours <= theirs or theirs <= ours):
+            continue
+        shared = ours & theirs
+        smaller = ours if len(ours) <= len(theirs) else theirs
+        # two words in common, or one distinctive long word
+        if not (len(shared) >= 2
+                or (len(smaller) == 1 and len(next(iter(smaller))) >= 6)):
+            continue
+        gap = abs(len(theirs) - len(ours))
+        if gap > 3:                      # too much extra text to trust
+            continue
+        if best is None or gap < best_gap or (gap == best_gap and len(k) < len(best)):
+            best, best_gap = k, gap
+    return best
+
+
 def _libretro_match(key, index):
-    exact, nospace, byletter, coll, abbrev = index
+    exact, nospace, byletter, coll, abbrev, toksets = index
     ck = collapse_initials(key)
     hit = (exact.get(key) or nospace.get(key.replace(" ", "")) or coll.get(ck))
     if not hit:
@@ -909,6 +936,10 @@ def _libretro_match(key, index):
             hit = exact[close[0]]
     if not hit:
         alt = loose_key(key, exact.keys())
+        if alt:
+            hit = exact[alt]
+    if not hit:
+        alt = subset_match(key, toksets)
         if alt:
             hit = exact[alt]
     return hit
@@ -1210,10 +1241,11 @@ def meta_lookup(sysid, name):
             nospace.setdefault(k.replace(" ", ""), k)
             toks.setdefault(_tokkey(k), k)
             toks.setdefault(collapse_initials(k), k)
-        entry = (idx, nospace, toks, list(idx.keys()))
+        toksets = [(k, frozenset(collapse_initials(k).split())) for k in idx]
+        entry = (idx, nospace, toks, list(idx.keys()), toksets)
         with _meta_lock:
             _meta_index[sysid] = entry
-    idx, nospace, toks, keys = entry
+    idx, nospace, toks, keys, toksets = entry
     if not idx:
         return None
     key = norm_title(name)
@@ -1226,7 +1258,7 @@ def meta_lookup(sysid, name):
     close = difflib.get_close_matches(key, keys, n=1, cutoff=0.9)
     if close:
         return idx[close[0]]
-    alt = loose_key(key, keys)
+    alt = loose_key(key, keys) or subset_match(key, toksets)
     return idx[alt] if alt else None
 
 
