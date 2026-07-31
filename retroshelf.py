@@ -186,10 +186,60 @@ POSIX_BINS = {
     "amiga": ["fs-uae", "amiberry"],
     "3do": ["retroarch"],
 }
-# systems that need a libretro core rather than a standalone emulator
-POSIX_CORE_ARGS = {
-    "3do": '{emu} -L opera_libretro.so "{rom}" -f',
+# Debian dropped most emulator packages, but RetroArch runs nearly everything
+# through libretro cores, so that is the fallback when nothing standalone is
+# installed. Cores are fetched from the libretro buildbot on request.
+LIBRETRO_CORES = {
+    "nes": "mesen", "snes": "snes9x", "n64": "mupen64plus_next",
+    "gb": "gambatte", "gba": "mgba", "nds": "melonds",
+    "genesis": "genesis_plus_gx", "dreamcast": "flycast",
+    "ps1": "swanstation", "psp": "ppsspp", "arcade": "fbneo",
+    "atari2600": "stella2014", "c64": "vice_x64", "amiga": "puae",
+    "3do": "opera",
 }
+CORE_BASE = "https://buildbot.libretro.com/nightly/linux/x86_64/latest/"
+
+
+def core_dirs():
+    home = Path.home()
+    return [home / ".config/retroarch/cores",
+            home / ".var/app/org.libretro.RetroArch/config/retroarch/cores",
+            Path("/usr/lib/x86_64-linux-gnu/libretro"),
+            Path("/usr/lib/libretro"),
+            Path("/usr/local/lib/libretro")]
+
+
+def find_core(sysid):
+    """Path to the installed libretro core for a system, if there is one."""
+    name = LIBRETRO_CORES.get(sysid)
+    if not name:
+        return None
+    fname = name + "_libretro.so"
+    for d in core_dirs():
+        p = d / fname
+        if p.is_file():
+            return p
+    return None
+
+
+def install_core(sysid):
+    """Fetch a libretro core from the buildbot into RetroArch's core folder."""
+    name = LIBRETRO_CORES.get(sysid)
+    if not name:
+        raise RuntimeError("no libretro core is defined for " + sysid)
+    dest = core_dirs()[0]
+    dest.mkdir(parents=True, exist_ok=True)
+    url = CORE_BASE + name + "_libretro.so.zip"
+    tmp = dest / (name + ".zip")
+    req = urllib.request.Request(url, headers={"User-Agent": "RetroShelf"})
+    with urllib.request.urlopen(req, timeout=120) as r, open(tmp, "wb") as f:
+        shutil.copyfileobj(r, f)
+    with zipfile.ZipFile(tmp) as z:
+        for m in z.infolist():
+            if m.filename.endswith(".so"):
+                z.extract(m, dest)
+    tmp.unlink(missing_ok=True)
+    return find_core(sysid)
 
 SYSTEMS_BY_ID = {s["id"]: s for s in SYSTEMS}
 ART_EXTS = [".png", ".jpg", ".jpeg", ".webp"]
@@ -337,6 +387,10 @@ def _find_emulator_posix(sysdef, cfg):
         found = shutil.which(name)
         if found:
             return Path(found)
+    # nothing standalone: RetroArch can run it if the core is installed
+    ra = shutil.which("retroarch")
+    if ra and find_core(sysid):
+        return Path(ra)
     return None
 
 
@@ -737,6 +791,20 @@ def _fetch_and_extract(sysid, spec, dest):
 
 def _download_worker(sysdef, emulators_root):
     sysid = sysdef["id"]
+    if os.name != "nt":
+        # on Linux the download is the libretro core for RetroArch
+        try:
+            _set_dl(sysid, status="downloading", pct=0, msg="")
+            if not shutil.which("retroarch"):
+                raise RuntimeError("retroarch is not installed")
+            core = install_core(sysid)
+            _emu_cache.clear()
+            if not core:
+                raise RuntimeError("core did not install")
+            _set_dl(sysid, status="done", pct=100, msg=str(core))
+        except Exception as e:
+            _set_dl(sysid, status="error", msg=str(e))
+        return
     try:
         _set_dl(sysid, status="resolving", pct=0, msg="")
         dest = Path(emulators_root) / sysid
@@ -763,7 +831,12 @@ def _download_worker(sysdef, emulators_root):
 
 def start_download(sysid, cfg):
     sysdef = SYSTEMS_BY_ID.get(sysid)
-    if not sysdef or not sysdef.get("dl"):
+    if not sysdef:
+        return False, "unknown system"
+    if os.name != "nt":
+        if sysid not in LIBRETRO_CORES:
+            return False, "no libretro core is available for this system"
+    elif not sysdef.get("dl"):
         return False, "no auto-download for this system"
     if DOWNLOADS.get(sysid, {}).get("status") in DL_ACTIVE:
         return True, "already downloading"
@@ -1722,7 +1795,8 @@ def build_state(cfg, rescan=False):
             "emu_name": sysdef["emu_name"],
             "emu_site": sysdef["emu_site"],
             "emu_url": sysdef["emu_url"],
-            "dl": "auto" if sysdef.get("dl") else "manual",
+            "dl": ("auto" if (sysdef["id"] in LIBRETRO_CORES if os.name != "nt"
+                              else bool(sysdef.get("dl"))) else "manual"),
             "note": sysdef.get("note", ""),
             "emu_found": emu is not None,
             "emu_path": str(emu) if emu else "",
@@ -2145,8 +2219,13 @@ def launch_game(cfg, system_id, rom):
             except Exception as e:
                 return False, str(e)
         args_tpl = cfg["overrides"].get(system_id, {}).get("args", sysdef["args"])
-        if os.name != "nt" and system_id in POSIX_CORE_ARGS:
-            args_tpl = POSIX_CORE_ARGS[system_id]
+        if os.name != "nt" and Path(emu).name.startswith("retroarch"):
+            core = find_core(system_id)
+            if not core:
+                return False, (f"no libretro core installed for {sysdef['name']}"
+                               " - use the download button, or "
+                               f"POST /api/download {{\"id\":\"{system_id}\"}}")
+            args_tpl = '"{emu}" -L "' + str(core) + '" "{rom}" -f'
         cmd = (args_tpl
                .replace("{emu}", str(emu))
                .replace("{emudir}", str(emu.parent))
@@ -2332,6 +2411,26 @@ class Handler(BaseHTTPRequestHandler):
                 moved, failed = quarantine(cfg, paths)
                 self._json({"ok": True, "moved": moved, "failed": failed,
                             "msg": f"moved {moved} file(s)"})
+            elif parsed.path == "/api/cores":
+                # install a libretro core for every system that has games but
+                # no working emulator - one call to get a fresh box playable
+                games = get_games(cfg)
+                todo = [s["id"] for s in SYSTEMS
+                        if games.get(s["id"]) and not find_emulator(s, cfg)
+                        and s["id"] in LIBRETRO_CORES]
+                done, failed = [], []
+                for sysid in todo:
+                    try:
+                        if install_core(sysid):
+                            done.append(sysid)
+                        else:
+                            failed.append(sysid)
+                    except Exception as e:
+                        failed.append(f"{sysid}: {e}")
+                _emu_cache.clear()
+                self._json({"ok": not failed, "installed": done,
+                            "failed": failed,
+                            "msg": f"installed {len(done)} core(s)"})
             elif parsed.path == "/api/scan":
                 request_rescan(cfg)
                 self._json({"ok": True, "msg": "scanning",

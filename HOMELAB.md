@@ -71,31 +71,41 @@ Only if the games really live on another machine do you need a mount, e.g. in
 
 ## 3. Emulators
 
-RetroShelf finds emulators on `PATH`, so packages are enough:
+Debian 13 dropped most emulator packages, so the reliable route is **RetroArch
+plus libretro cores** — RetroShelf downloads the cores itself:
 
 ```bash
-sudo apt update
-sudo apt install -y retroarch mgba-qt snes9x-gtk mupen64plus-ui-console \
-                    dolphin-emu mednafen stella vice fs-uae mame
+sudo apt install -y retroarch
+curl -s -XPOST http://localhost:7830/api/cores -d '{}' -H 'Content-Type: application/json'
 ```
 
-DuckStation (PlayStation) and PCSX2 (PS2) are not in the Debian repos — use
-Flatpak, then drop a small wrapper on `PATH` so RetroShelf can find it:
+`/api/cores` installs a core for every system that has games but no emulator,
+into `~/.config/retroarch/cores`. One system at a time instead:
+
+```bash
+curl -s -XPOST http://localhost:7830/api/download -d '{"id":"snes"}' -H 'Content-Type: application/json'
+```
+
+Cores used: snes9x, mupen64plus_next, swanstation (PlayStation), puae (Amiga),
+fbneo (arcade), opera (3DO), mesen, gambatte, mgba, genesis_plus_gx,
+stella2014, vice_x64, flycast, ppsspp, melonds.
+
+Standalone emulators are still preferred when present, so anything you install
+by hand (apt, Flatpak, an AppImage in `emulators/<system>/`) wins over the
+core. Flatpak versions of DuckStation and PCSX2 need a wrapper on PATH:
 
 ```bash
 flatpak install -y flathub org.duckstation.DuckStation
-sudo tee /usr/local/bin/duckstation-qt >/dev/null <<'EOF'
+sudo tee /usr/local/bin/duckstation-qt >/dev/null <<'EOF2'
 #!/bin/sh
 exec flatpak run org.duckstation.DuckStation "$@"
-EOF
+EOF2
 sudo chmod +x /usr/local/bin/duckstation-qt
 ```
 
-Anything not on `PATH` also works if you drop the binary or an AppImage into
-`/srv/retroshelf/emulators/<system>/`.
-
 BIOS files (PlayStation, 3DO, Dreamcast, Amiga Kickstarts) go in
-`/srv/retroshelf/bios/<system>/` and are copied into place on first launch.
+`/srv/retroshelf/bios/<system>/`. RetroArch cores look in
+`~/.config/retroarch/system/` — copy them there too if a core complains.
 
 ## 4. Run it
 
