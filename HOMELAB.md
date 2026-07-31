@@ -104,6 +104,36 @@ systemctl --user enable --now retroshelf
 loginctl enable-linger "$USER"        # survives logout/reboot
 ```
 
+## 4b. If systemd says there is no user bus
+
+`systemctl --user` needs a login session. From an SSH shell that has one:
+
+```bash
+loginctl enable-linger "$USER"
+systemctl --user daemon-reload && systemctl --user enable --now retroshelf
+```
+
+If the user bus still is not available (some agent/automation shells), install
+it as a system service instead:
+
+```bash
+sudo tee /etc/systemd/system/retroshelf.service >/dev/null <<EOF
+[Unit]
+Description=RetroShelf game library
+After=network-online.target
+
+[Service]
+User=$USER
+ExecStart=/usr/bin/python3 /home/$USER/retroshelf/retroshelf.py --serve --host 0.0.0.0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now retroshelf
+```
+
 ## 5. Check it works
 
 ```bash
@@ -113,6 +143,27 @@ python3 ~/retroshelf/retroshelf_tui.py --local --list | head
 
 The second command prints the detected systems with `[ok ]` or `[no ]` for
 whether an emulator was found, then the games.
+
+Check the paths it is actually using — if `library_root` looks like a Windows
+path, `retroshelf.json` was not picked up. It must sit next to
+`retroshelf.py` (`~/retroshelf/retroshelf.json`):
+
+```bash
+curl -s http://localhost:7830/api/state | python3 -c \
+  "import json,sys; d=json.load(sys.stdin); print(d['library_root'], d['emulators_root'])"
+```
+
+After adding games, rescan without restarting:
+
+```bash
+curl -s -XPOST http://localhost:7830/api/scan -d '{}' -H 'Content-Type: application/json'
+```
+
+(New files are also picked up automatically within about 20 seconds, and `r`
+in the TUI forces a scan.)
+
+If a system shows `[no ]`, the emulator is not on `PATH` — check with
+`which mgba-qt retroarch dolphin-emu`, and see step 3.
 
 ## 6. Connect from the ThinkPad
 

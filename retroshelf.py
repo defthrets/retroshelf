@@ -266,10 +266,22 @@ def exts_for(sysid):
 
 
 def default_config():
+    """Defaults follow the platform: C:\\RetroShelf on Windows, and on
+    Linux/macOS /srv/retroshelf if it exists (a typical server layout),
+    otherwise ~/RetroShelf."""
+    if os.name == "nt":
+        root = Path("C:/RetroShelf")
+        games = root / "games"
+    elif Path("/srv/retroshelf").is_dir() or Path("/srv/games").is_dir():
+        root = Path("/srv/retroshelf")
+        games = Path("/srv/games")
+    else:
+        root = Path.home() / "RetroShelf"
+        games = root / "games"
     return {
-        "library_root": "C:\\RetroShelf\\games",
-        "emulators_root": "C:\\RetroShelf\\emulators",
-        "art_root": "C:\\RetroShelf\\art",
+        "library_root": str(games),
+        "emulators_root": str(root / "emulators"),
+        "art_root": str(root / "art"),
         "covers_dir": "",
         "overrides": {}, "stats": {},
     }
@@ -2320,6 +2332,10 @@ class Handler(BaseHTTPRequestHandler):
                 moved, failed = quarantine(cfg, paths)
                 self._json({"ok": True, "moved": moved, "failed": failed,
                             "msg": f"moved {moved} file(s)"})
+            elif parsed.path == "/api/scan":
+                request_rescan(cfg)
+                self._json({"ok": True, "msg": "scanning",
+                            "games": sum(len(v) for v in get_games(cfg).values())})
             elif parsed.path == "/api/clearcache":
                 try:
                     clear_cache(cfg)
