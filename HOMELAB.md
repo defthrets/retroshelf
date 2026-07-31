@@ -5,6 +5,21 @@ ThinkPad (or any terminal) browses it and tells it what to launch.
 
 Only Python 3 is required. There is nothing to pip install.
 
+## Quick install (one script)
+
+```bash
+git clone https://github.com/defthrets/retroshelf.git ~/retroshelf
+cd ~/retroshelf
+chmod +x homelab-install.sh
+./homelab-install.sh
+```
+
+It finds the games folder, installs the emulators, writes the config and
+starts the server, then prints what it detected. Point it somewhere specific
+with `GAMES=/mnt/oldgames ./homelab-install.sh`.
+
+The steps below are the same thing done by hand.
+
 ## 1. Get the code
 
 ```bash
