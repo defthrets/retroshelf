@@ -277,6 +277,17 @@ ARCHIVE_EXTS = {".zip", ".7z", ".rar"}
 DISC_SYSTEMS = {"ps1", "ps2", "psp", "dreamcast", "gamecube", "wii", "3do"}
 DISC_PLAYABLE = [".cue", ".chd", ".m3u", ".pbp", ".iso", ".img", ".bin", ".gdi",
                  ".cdi", ".cso", ".mds"]
+# emulators disagree about which disc file to be handed: DuckStation wants the
+# cue sheet, PCSX2 cannot read one and needs the image itself, and so on
+DISC_PREFERENCE = {
+    "ps1": [".m3u", ".cue", ".chd", ".pbp", ".iso", ".img", ".bin"],
+    "ps2": [".iso", ".chd", ".cso", ".gz", ".bin", ".img"],
+    "psp": [".iso", ".cso", ".chd", ".pbp"],
+    "dreamcast": [".gdi", ".chd", ".cdi", ".cue", ".iso"],
+    "gamecube": [".rvz", ".iso", ".gcm", ".ciso", ".chd"],
+    "wii": [".rvz", ".iso", ".wbfs", ".ciso", ".chd"],
+    "3do": [".cue", ".chd", ".iso", ".bin"],
+}
 # Folder-name hints (checked deepest folder first; more specific systems first)
 HINTS = {
     "gba": ["gba", "game boy advance", "gameboy advance"],
@@ -2210,15 +2221,18 @@ def clear_cache(cfg):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _pick_disc(d):
-    """Best playable disc file inside an extracted folder."""
+def _pick_disc(d, sysid=None):
+    """Best playable disc file inside an extracted folder, in the order the
+    system's emulator actually accepts."""
     files = [p for p in d.rglob("*") if p.is_file()]
-    for ext in DISC_PLAYABLE:
+    order = DISC_PREFERENCE.get(sysid or "", DISC_PLAYABLE)
+    for ext in order:
         hits = sorted((p for p in files if p.suffix.lower() == ext),
-                      key=lambda p: (len(p.parts), p.name.lower()))
+                      key=lambda p: (len(p.parts), -p.stat().st_size
+                                     if p.exists() else 0, p.name.lower()))
         if hits:
             if ext == ".bin" and len(hits) > 1:
-                continue          # multi-track bin set needs its cue
+                continue          # multi-track bin set needs its cue sheet
             return hits[0]
     return None
 
@@ -2226,7 +2240,7 @@ def _pick_disc(d):
 def unpack_disc(cfg, sysid, rom_path):
     """Archived disc images are extracted once into the cache folder."""
     dest = cache_dir(cfg, sysid) / _vol_name(rom_path.stem)
-    hit = _pick_disc(dest) if dest.is_dir() else None
+    hit = _pick_disc(dest, sysid) if dest.is_dir() else None
     if hit:
         return hit
     extract_archive(rom_path, dest)
@@ -2234,7 +2248,7 @@ def unpack_disc(cfg, sysid, rom_path):
         if inner.is_file() and inner.suffix.lower() in ARCHIVE_EXTS:
             extract_archive(inner, dest)
             inner.unlink(missing_ok=True)
-    hit = _pick_disc(dest)
+    hit = _pick_disc(dest, sysid)
     if not hit:
         raise RuntimeError("no disc image found inside " + rom_path.name)
     return hit
