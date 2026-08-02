@@ -117,8 +117,11 @@ SYSTEMS = [
      "exes": ["pcsx2-qt.exe", "pcsx2-qtx64-avx2.exe", "pcsx2.exe"],
      "args": DEFAULT_ARGS,
      "emu_name": "PCSX2", "emu_site": "pcsx2.net",
-     "emu_url": "https://pcsx2.net/downloads", "dl": None,
-     "note": "PCSX2 ships as a 7z/installer — install manually. Needs a PS2 BIOS."},
+     "emu_url": "https://github.com/PCSX2/pcsx2/releases",
+     "dl": {"repo": "PCSX2/pcsx2", "asset": r"windows-x64-Qt\.7z$"},
+     "note": "Needs a PS2 BIOS dump from your own console (e.g. SCPH-70012.bin "
+             "with its .MEC/.NVM files). Disc images in zip/7z/rar are unpacked "
+             "automatically on first launch."},
     {"id": "psp", "name": "PlayStation Portable",
      "exes": ["ppssppwindows64.exe", "ppssppwindows.exe"], "args": DEFAULT_ARGS,
      "emu_name": "PPSSPP", "emu_site": "ppsspp.org",
@@ -2077,40 +2080,6 @@ def quarantine(cfg, paths):
     return moved, failed
 
 
-# Gamepad mapping DuckStation's own setup wizard would write for the first
-# SDL controller (Xbox layout: A=bottom, B=right, X=left, Y=top).
-DUCKSTATION_PAD1 = """[Pad1]
-Type = AnalogController
-Up = SDL-0/DPadUp
-Down = SDL-0/DPadDown
-Left = SDL-0/DPadLeft
-Right = SDL-0/DPadRight
-Cross = SDL-0/A
-Circle = SDL-0/B
-Square = SDL-0/X
-Triangle = SDL-0/Y
-Select = SDL-0/Back
-Start = SDL-0/Start
-L1 = SDL-0/LeftShoulder
-R1 = SDL-0/RightShoulder
-L2 = SDL-0/+LeftTrigger
-R2 = SDL-0/+RightTrigger
-L3 = SDL-0/LeftStick
-R3 = SDL-0/RightStick
-Analog = SDL-0/Guide
-LLeft = SDL-0/-LeftX
-LRight = SDL-0/+LeftX
-LUp = SDL-0/-LeftY
-LDown = SDL-0/+LeftY
-RLeft = SDL-0/-RightX
-RRight = SDL-0/+RightX
-RUp = SDL-0/-RightY
-RDown = SDL-0/+RightY
-LargeMotor = SDL-0/LargeMotor
-SmallMotor = SDL-0/SmallMotor
-"""
-
-
 def _ini_section(text, name):
     """Return (start, end) of an ini section body including its header."""
     head = "[" + name + "]"
@@ -2135,6 +2104,37 @@ def _set_ini_key(text, section, key, value):
     return text[:span[0]] + body + text[span[1]:]
 
 
+PAD_BINDINGS = [
+    ("Up", "SDL-0/DPadUp"), ("Down", "SDL-0/DPadDown"),
+    ("Left", "SDL-0/DPadLeft"), ("Right", "SDL-0/DPadRight"),
+    ("Cross", "SDL-0/A"), ("Circle", "SDL-0/B"),
+    ("Square", "SDL-0/X"), ("Triangle", "SDL-0/Y"),
+    ("Select", "SDL-0/Back"), ("Start", "SDL-0/Start"),
+    ("L1", "SDL-0/LeftShoulder"), ("R1", "SDL-0/RightShoulder"),
+    ("L2", "SDL-0/+LeftTrigger"), ("R2", "SDL-0/+RightTrigger"),
+    ("L3", "SDL-0/LeftStick"), ("R3", "SDL-0/RightStick"),
+    ("Analog", "SDL-0/Guide"),
+    ("LLeft", "SDL-0/-LeftX"), ("LRight", "SDL-0/+LeftX"),
+    ("LUp", "SDL-0/-LeftY"), ("LDown", "SDL-0/+LeftY"),
+    ("RLeft", "SDL-0/-RightX"), ("RRight", "SDL-0/+RightX"),
+    ("RUp", "SDL-0/-RightY"), ("RDown", "SDL-0/+RightY"),
+    ("LargeMotor", "SDL-0/LargeMotor"), ("SmallMotor", "SDL-0/SmallMotor"),
+]
+
+
+def bind_pad(text, section, pad_type):
+    """Point a pad section at the first SDL gamepad, leaving any other keys in
+    that section (deadzone, axis scale and so on) untouched."""
+    span = _ini_section(text, section)
+    body = text[span[0]:span[1]] if span else ""
+    if "SDL-" in body or "XInput-" in body:
+        return text                      # already mapped to a controller
+    text = _set_ini_key(text, section, "Type", pad_type)
+    for key, value in PAD_BINDINGS:
+        text = _set_ini_key(text, section, key, value)
+    return text
+
+
 def prep_emulator(sysid, emu):
     """First-run tweaks so a freshly downloaded emulator boots games directly
     instead of stopping at its setup wizard - which is also where it would
@@ -2151,14 +2151,26 @@ def prep_emulator(sysid, emu):
                 text = _set_ini_key(text, "Main", "SetupWizardIncomplete", "false")
             text = _set_ini_key(text, "BIOS", "SearchDirectory", "bios")
             text = _set_ini_key(text, "InputSources", "SDL", "true")
-            # bind the first gamepad unless the user has mapped one already
-            span = _ini_section(text, "Pad1")
-            pad = text[span[0]:span[1]] if span else ""
-            if "SDL-" not in pad and "XInput-" not in pad:
-                if span:
-                    text = text[:span[0]] + DUCKSTATION_PAD1 + "\n" + text[span[1]:]
-                else:
-                    text = text.rstrip("\n") + "\n\n" + DUCKSTATION_PAD1
+            text = bind_pad(text, "Pad1", "AnalogController")
+            ini.write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+    elif sysid == "ps2":
+        try:
+            # keep PCSX2's data next to the exe rather than in Documents
+            marker = base / "portable.ini"
+            if not marker.exists():
+                marker.write_text("", encoding="utf-8")
+            ini = base / "inis" / "PCSX2.ini"
+            ini.parent.mkdir(parents=True, exist_ok=True)
+            # PCSX2 discards a config without its version marker and then
+            # regenerates defaults, which would put the wizard back
+            text = ini.read_text(encoding="utf-8", errors="replace") \
+                if ini.exists() else "[UI]\nSettingsVersion = 1\n"
+            text = _set_ini_key(text, "UI", "SetupWizardIncomplete", "false")
+            text = _set_ini_key(text, "Folders", "Bios", "bios")
+            text = _set_ini_key(text, "InputSources", "SDL", "true")
+            text = bind_pad(text, "Pad1", "DualShock2")
             ini.write_text(text, encoding="utf-8")
         except OSError:
             pass
